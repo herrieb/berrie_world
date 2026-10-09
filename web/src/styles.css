@@ -132,9 +132,10 @@ h4 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spa
 
 /* inspector */
 .inspector { display: flex; flex-direction: column; max-height: 100%; min-height: 0; }
-.insp-head { display: flex; gap: 10px; align-items: flex-start; padding: 14px 14px 10px; }
+.insp-head { display: flex; gap: 8px 10px; align-items: flex-start; padding: 14px 14px 10px; flex-wrap: wrap; }
+.insp-head .grow { flex: 1 1 150px; min-width: 150px; }
 .insp-icon { width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); flex: none; }
-.insp-head h2 { font-size: 17px; display: flex; align-items: center; gap: 4px; word-break: break-word; }
+.insp-head h2 { font-size: 17px; display: flex; align-items: center; gap: 4px; overflow-wrap: anywhere; }
 .insp-head .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 12px; color: var(--c); background: color-mix(in srgb, var(--c) 15%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); white-space: nowrap; }
 .pill .dot { background: var(--c); }
@@ -378,3 +379,19 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 button:disabled:hover { border-color: var(--line-2); }
 .genkey { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .genkey pre { width: 100%; }
+
+/* topology */
+.vbadge { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-left: 4px; text-transform: lowercase; white-space: nowrap; }
+.v-verified { background: #173d2a; color: #8ff0b6; }
+.v-configured { background: #1d3150; color: #a9cdf5; }
+.v-observed { background: #2f2a50; color: #c9b8ff; }
+.v-inferred, .v-unverified { background: #3a3f4c; color: #c8ccd6; border: 1px dashed #8a94a6; }
+.route { list-style: none; padding: 0; margin: 0 0 10px; display: flex; flex-direction: column; gap: 2px; }
+.route li { display: flex; flex-direction: column; align-items: flex-start; }
+.route .hop { font-size: 11px; color: var(--muted); padding: 2px 0 2px 14px; border-left: 2px solid var(--line-2); margin-left: 8px; display: flex; gap: 4px; align-items: center; }
+.route button { background: transparent; border: 1px solid var(--line-2); padding: 4px 8px; }
+.route button small { color: var(--muted); margin-left: 6px; font-size: 11px; }
+.impact h5 { margin: 10px 0 4px; font-size: 12px; }
+.link-ends { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.link-ends span { color: var(--muted); font-size: 16px; }
+.evidence { margin: 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; }

@@ -7,6 +7,9 @@ import type { Scheduler } from '../core/scheduler.js';
 import { redactError, sanitizeDetails } from '../core/redact.js';
 import { isBuildingType } from '../adapters/classify.js';
 import { type Auth, type Principal, RateLimiter } from './auth.js';
+import type { ConnectionView } from '@berrie/shared';
+import { ConnectionStore } from '../db/connections.js';
+import { impactOf, routeOf } from '../core/impact.js';
 
 const ACTIONS = ['start', 'stop', 'restart'] as const;
 type Action = (typeof ACTIONS)[number];
@@ -73,9 +76,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     return !!e && entityVisible(p, e);
   };
   const viewsFor = (p: Principal | null): EntityView[] => repo.views().filter((v) => entityVisible(p, v));
+  /** A relationship is visible only if both of its ends are. */
+  const connectionVisible = (p: Principal | null, c: ConnectionView) => {
+    const a = repo.getEntity(c.src), b = repo.getEntity(c.dst);
+    return !!a && !!b && entityVisible(p, a) && entityVisible(p, b);
+  };
+  const connectionsFor = (p: Principal | null) => repo.connections.list().map(ConnectionStore.view).filter((c) => c.lifecycle !== 'archived' && connectionVisible(p, c));
 
   const snapshot = (p: Principal | null): WorldSnapshot => ({
-    mode: cfg.mode, entities: viewsFor(p), blocks: repo.blockViews().filter((b) => blockVisible(p, b)),
+    mode: cfg.mode, entities: viewsFor(p), connections: connectionsFor(p), blocks: repo.blockViews().filter((b) => blockVisible(p, b)),
     adapters: repo.listAdapterStates().filter((a) => adapterVisible(p, a)),
     hints: scheduler.hints.filter((h) => hintVisible(p, h)),
     recentEvents: repo.listEvents({ limit: 120 }).filter((ev) => eventVisible(p, ev)).slice(0, 60),
@@ -153,6 +162,30 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     } catch (err) {
       return reply.code(502).send({ error: redactError(err) });
     }
+  });
+
+  // ---------- topology: route explorer and impact analysis (read-only; simulation changes nothing) ----------
+  app.get('/api/entities/:id/route', { schema: { params: ID_PARAM } }, async (req, reply) => {
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
+    if (!e) return;
+    const p = me(req);
+    const r = routeOf(cfg, repo, e.id);
+    const ok = (id: string) => { const x = repo.getEntity(id); return !!x && entityVisible(p, x); };
+    return {
+      routes: r.routes.filter((hops) => hops.every((h) => ok(h.entityId))),
+      upstream: r.upstream.filter((u) => ok(u.entityId)),
+      downstream: r.downstream.filter((d) => ok(d.entityId)),
+    };
+  });
+
+  app.get('/api/impact/:id', { schema: { params: ID_PARAM, querystring: { type: 'object', properties: { simulate: { type: 'boolean' } } } } }, async (req, reply) => {
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
+    if (!e) return;
+    const p = me(req);
+    const r = impactOf(cfg, repo, e.id, !!(req.query as { simulate?: boolean }).simulate);
+    // Hidden dependents are not listed (and not counted), so the report never leaks other servers.
+    const items = r.items.filter((i) => { const x = repo.getEntity(i.entityId); return !!x && entityVisible(p, x); });
+    return { ...r, items };
   });
 
   app.get('/api/archive', async (req) => {
@@ -276,7 +309,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     const resolve = (ref: string) => repo.getEntity(ref)?.id ?? repo.getEntity(`endpoint:${ref.toLowerCase()}`)?.id ?? null;
     const entityId = resolve(b.entity);
     if (!entityId) return reply.code(404).send({ error: 'unknown entity' });
-    const ev = world.emit({ type: b.type, entityId, relatedEntityId: b.related ? resolve(b.related) : null, severity: b.severity ?? 'info', source: 'ingest', details: sanitizeDetails(b.details) });
+    const relatedId = b.related ? resolve(b.related) : null;
+    const ev = world.emit({ type: b.type, entityId, relatedEntityId: relatedId, severity: b.severity ?? 'info', source: 'ingest', details: sanitizeDetails(b.details) });
+    // Reported traffic between two known entities is evidence of a relationship (labelled 'observed').
+    if (relatedId && relatedId !== entityId && (b.type === 'http.request' || b.type === 'ai.request_started' || b.type === 'automation.executed')) world.observeTraffic(entityId, relatedId, ev.ts);
     return { id: ev.id };
   });
 
@@ -291,6 +327,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
       entity: (v) => { if (p && entityVisible(p, v)) send({ t: 'entity', data: v }); },
       event: (e) => { if (p && eventVisible(p, e)) send({ t: 'event', data: e }); },
       blocks: (b) => send({ t: 'blocks', data: b.filter((x) => blockVisible(p, x)) }),
+      connection: (c) => { if (p && connectionVisible(p, c)) send({ t: 'connection', data: c }); },
     });
     const extra = setInterval(() => {
       // Sessions can be revoked, users disabled or their server access changed: re-check regularly.

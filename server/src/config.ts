@@ -40,6 +40,25 @@ export interface ManualServiceConfig {
   check?: CheckConfig;
 }
 
+/** A reverse proxy, tunnel or gateway that public hostnames pass through. */
+export interface GatewayConfig {
+  id: string;
+  name: string;
+  host: string;
+  kind: 'cloudflare-tunnel' | 'reverse-proxy' | 'other';
+  /** Hostname globs routed through this gateway, e.g. "*.example.com". */
+  routes?: string[];
+  /** If the gateway runs as a known container, its entity id (e.g. docker:srv01:proxy/caddy); otherwise a gateway building is created. */
+  entity?: string;
+  check?: CheckConfig;
+}
+
+/** A third-party service shown on the external island. */
+export interface ExternalConfig { id: string; name: string; hostnames?: string[]; check?: CheckConfig }
+
+/** A relationship declared by hand (configured, not observed). */
+export interface ConnectionConfig { from: string; to: string; type: 'lan' | 'vpn' | 'direct' | 'internet' | 'dependency' | 'database' | 'api'; description?: string }
+
 export interface AppConfig {
   mode: 'live' | 'demo';
   port: number;
@@ -66,6 +85,9 @@ export interface AppConfig {
   /** Entity ids or container names that must never be controlled through actions. */
   protected: string[];
   tunnelConfigPaths: string[];
+  gateways: GatewayConfig[];
+  externals: ExternalConfig[];
+  connections: ConnectionConfig[];
   /** Optional TCP target used to tell "endpoint down" from "monitor has no network". */
   canary: { host: string; port: number } | null;
 }
@@ -126,6 +148,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     hints: file.hints ?? [],
     protected: file.protected ?? [],
     tunnelConfigPaths: file.tunnelConfigPaths ?? [],
+    gateways: file.gateways ?? [],
+    externals: file.externals ?? [],
+    connections: file.connections ?? [],
     canary: file.canary ?? null,
   };
 }

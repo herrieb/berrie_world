@@ -1,6 +1,7 @@
 import type {
-  BlockView, BuildingType, Completeness, EntityKind, EntityView, EventType, Health, Severity, WorldEvent,
+  BlockView, BuildingType, Completeness, ConnectionType, ConnectionView, EntityKind, EntityView, EventType, Health, Severity, Verification, WorldEvent,
 } from '@berrie/shared';
+import { ConnectionStore } from '../db/connections.js';
 import { BLOCK_PITCH } from '@berrie/shared';
 import type { EntityRow, Repo } from '../db/repo.js';
 
@@ -39,6 +40,33 @@ export interface ProbeOutcome {
   successThreshold?: number;
 }
 
+/** A relationship as reported by one topology source in one run. */
+export interface ObservedConnection {
+  id: string;
+  src: string;
+  dst: string;
+  type: ConnectionType;
+  verification: Verification;
+  evidence: string[];
+  health?: { health: Health; reason: string | null };
+  meta?: ConnectionView['meta'];
+}
+
+export interface ConnectionInventory {
+  source: string;
+  scope: string;
+  completeness: Completeness;
+  connections: ObservedConnection[];
+  error?: string | null;
+}
+
+/** Stable id; symmetric network links sort their ends so A↔B and B↔A are one record. */
+export function connectionId(type: ConnectionType, a: string, b: string): string {
+  const sym = type === 'lan' || type === 'vpn' || type === 'direct';
+  const [x, y] = sym && b < a ? [b, a] : [a, b];
+  return `conn:${type}:${x}>${y}`;
+}
+
 export interface WorldOptions {
   removal: { confirmations: number; minMissingSeconds: number; archiveAfterHours: number };
   unknownAfterInventoryFailures: number;
@@ -48,6 +76,7 @@ export type WorldListener = {
   entity?: (v: EntityView) => void;
   event?: (e: WorldEvent) => void;
   blocks?: (b: BlockView[]) => void;
+  connection?: (c: ConnectionView) => void;
 };
 
 const BAD: Health[] = ['degraded', 'unhealthy', 'unreachable', 'restarting', 'host_offline'];
@@ -245,6 +274,99 @@ export class World {
     return n;
   }
 
+  // ---------------- connections ----------------
+
+  private pushConnection(id: string): void {
+    const c = this.repo.connections.get(id);
+    if (!c) return;
+    const v = ConnectionStore.view(c);
+    for (const l of this.listeners) l.connection?.(v);
+  }
+
+  /**
+   * Reconcile one topology source. Same evidence rules as entities: only a complete report can make a relationship
+   * missing, and removal needs repeated confirmation. Health changes are events, never removals.
+   */
+  reconcileConnections(inv: ConnectionInventory): { created: number; missing: number; removed: number } {
+    const stats = { created: 0, missing: 0, removed: 0 };
+    const now = this.repo.now();
+    const changed = new Set<string>();
+    this.repo.tx(() => {
+      const seen = new Set<string>();
+      for (const o of inv.connections) {
+        seen.add(o.id);
+        const cur = this.repo.connections.get(o.id);
+        const health = o.health?.health ?? 'unknown';
+        const reason = o.health?.reason ?? null;
+        if (!cur) {
+          this.repo.connections.insert({ id: o.id, src: o.src, dst: o.dst, type: o.type, source: inv.source, scope: inv.scope, verification: o.verification,
+            lifecycle: 'discovered', health, reason, evidence: o.evidence, meta: o.meta ?? {}, lastSeenAt: now });
+          stats.created++;
+          // Network topology changes are worth an event; individual compose dependencies are not (noise).
+          if (o.type !== 'dependency' && o.type !== 'database') {
+            this.emit({ type: 'connection.discovered', entityId: o.src, relatedEntityId: o.dst, source: inv.source, details: { connection: o.id, type: o.type, verification: o.verification } });
+          }
+        } else {
+          const wasGone = cur.lifecycle === 'missing' || cur.lifecycle === 'removed' || cur.lifecycle === 'archived';
+          if (cur.health !== health) {
+            const bad = (h: Health) => h === 'unhealthy' || h === 'unreachable' || h === 'degraded';
+            if (bad(health)) this.emit({ type: 'connection.degraded', entityId: o.src, relatedEntityId: o.dst, source: inv.source, severity: 'warning', details: { connection: o.id, type: o.type, from: cur.health, to: health, reason } });
+            else if (health === 'healthy' && bad(cur.health)) this.emit({ type: 'connection.recovered', entityId: o.src, relatedEntityId: o.dst, source: inv.source, severity: 'notice', details: { connection: o.id, type: o.type } });
+          }
+          this.repo.connections.update(o.id, {
+            src: o.src, dst: o.dst, type: o.type, source: inv.source, scope: inv.scope, verification: o.verification, health, reason, evidence: o.evidence,
+            meta: { ...(o.meta ?? {}) }, lastSeenAt: now, lifecycle: cur.lifecycle === 'discovered' || wasGone ? 'active' : cur.lifecycle,
+            missingSince: null, missingCount: 0, removedAt: null, archivedAt: null,
+          });
+        }
+        changed.add(o.id);
+      }
+      if (inv.completeness !== 'complete') return;
+      for (const c of this.repo.connections.bySource(inv.source, inv.scope)) {
+        if (seen.has(c.id) || c.lifecycle === 'removed') continue;
+        const missingSince = c.missingSince ?? now;
+        const missingCount = c.missingCount + 1;
+        const elapsed = (Date.parse(now) - Date.parse(missingSince)) / 1000;
+        if (missingCount >= this.opts.removal.confirmations && elapsed >= this.opts.removal.minMissingSeconds) {
+          this.repo.connections.update(c.id, { lifecycle: 'removed', removedAt: now, missingCount, missingSince });
+          this.emit({ type: 'connection.removed', entityId: c.src, relatedEntityId: c.dst, source: inv.source, severity: 'notice', details: { connection: c.id, type: c.type } });
+          stats.removed++;
+        } else {
+          if (c.lifecycle !== 'missing') this.emit({ type: 'connection.missing', entityId: c.src, relatedEntityId: c.dst, source: inv.source, severity: 'notice', details: { connection: c.id, type: c.type } });
+          this.repo.connections.update(c.id, { lifecycle: 'missing', missingSince, missingCount });
+          stats.missing++;
+        }
+        changed.add(c.id);
+      }
+    });
+    for (const id of changed) this.pushConnection(id);
+    return stats;
+  }
+
+  /** Observed traffic between two known entities: record activity on the relationship (creating an 'observed' one if needed). */
+  observeTraffic(src: string, dst: string, at: string): void {
+    const existing = this.repo.connections.touching(src).find((c) => (c.src === src && c.dst === dst) || (c.src === dst && c.dst === src));
+    if (existing) {
+      this.repo.connections.update(existing.id, { lastActivityAt: at });
+      this.pushConnection(existing.id);
+      return;
+    }
+    const id = connectionId('api', src, dst);
+    this.repo.connections.insert({ id, src, dst, type: 'api', source: 'ingest', scope: 'ingest', verification: 'observed', lifecycle: 'active', health: 'unknown',
+      reason: 'traffic reported via the ingest API', evidence: ['traffic reported via the ingest API'], meta: {}, lastSeenAt: at, lastActivityAt: at });
+    this.emit({ type: 'connection.discovered', entityId: src, relatedEntityId: dst, source: 'ingest', details: { connection: id, type: 'api', verification: 'observed' } });
+    this.pushConnection(id);
+  }
+
+  /** Removed relationships leave the map after the same retention as entities; archived ones stay in history. */
+  archiveConnectionsPass(): void {
+    const cutoff = Date.parse(this.repo.now()) - this.opts.removal.archiveAfterHours * 3600_000;
+    for (const c of this.repo.connections.list().filter((x) => x.lifecycle === 'removed' && x.removedAt && Date.parse(x.removedAt) <= cutoff)) {
+      this.repo.connections.update(c.id, { lifecycle: 'archived', archivedAt: this.repo.now() });
+      this.pushConnection(c.id);
+    }
+  }
+
   // ---------------- health ----------------
 
   /** Set an entity's own health. Factual sources (Docker state) apply immediately; probes go through recordProbe. */
@@ -380,6 +502,10 @@ export class World {
         n++;
       }
       this.repo.releaseEmptyBlocks((district) => district === hostId);
+      const archivedIds = new Set(this.repo.listEntities(true).filter((x) => x.hostId === hostId || x.id === hostId).map((x) => x.id));
+      for (const c of this.repo.connections.list().filter((x) => archivedIds.has(x.src) || archivedIds.has(x.dst))) {
+        this.repo.connections.update(c.id, { lifecycle: 'archived', removedAt: c.removedAt ?? now, archivedAt: now });
+      }
       this.blocksDirty = true;
       this.emit({ type: 'service.archived', entityId: hostId, source: by, severity: 'notice', details: { name: hostId, reason: 'server archived in Server Harbor', entities: n, by } });
     });
@@ -391,7 +517,7 @@ export class World {
 
   private needsBuilding(e: EntityRow, byId: Map<string, EntityRow>): boolean {
     if (e.lifecycle === 'archived') return false;
-    if (e.kind === 'host' || e.kind === 'service') return true;
+    if (e.kind === 'host' || e.kind === 'service' || e.kind === 'gateway' || e.kind === 'external') return true;
     if (e.kind === 'endpoint') {
       const p = e.parentId ? byId.get(e.parentId) : undefined;
       return !(p && p.kind === 'service' && p.lifecycle !== 'archived');
@@ -426,6 +552,8 @@ export class World {
     const p = e.parentId ? byId.get(e.parentId) : undefined;
     if (e.kind === 'service' && p?.kind === 'project') return p.id;
     if (e.kind === 'endpoint') return `web:${district}`;
+    if (e.kind === 'gateway') return `gw:${district}`;
+    if (e.kind === 'external') return 'ports:external';
     return `misc:${district}`;
   }
 

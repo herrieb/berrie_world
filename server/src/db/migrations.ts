@@ -6,6 +6,8 @@ export interface Migration {
   name: string;
   up: string;
   down: string;
+  /** Table rebuilds must run with foreign keys disabled (SQLite ignores the pragma inside a transaction). */
+  foreignKeysOff?: boolean;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -283,6 +285,60 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE metrics_hourly; DROP TABLE metrics; DROP TABLE host_facts; DROP TABLE hosts;
     `,
   },
+  {
+    version: 4,
+    name: 'topology: gateways, external services and connections',
+    foreignKeysOff: true,
+    up: `
+      -- Rebuild entities to allow the new kinds (SQLite cannot alter a CHECK constraint in place).
+      CREATE TABLE entities_v4 (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('host','project','service','endpoint','gateway','external')),
+        name TEXT NOT NULL, display_name TEXT, building_type TEXT NOT NULL, parent_id TEXT, host_id TEXT,
+        origin TEXT NOT NULL CHECK (origin IN ('live','demo')), source TEXT NOT NULL, scope TEXT NOT NULL,
+        lifecycle TEXT NOT NULL CHECK (lifecycle IN ('discovered','active','missing','removed','archived')),
+        hostnames TEXT NOT NULL DEFAULT '[]', depends_on TEXT NOT NULL DEFAULT '[]', meta TEXT NOT NULL DEFAULT '{}',
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT, missing_since TEXT, missing_count INTEGER NOT NULL DEFAULT 0,
+        removed_at TEXT, archived_at TEXT, updated_at TEXT NOT NULL
+      );
+      INSERT INTO entities_v4 SELECT id, kind, name, display_name, building_type, parent_id, host_id, origin, source, scope, lifecycle,
+        hostnames, depends_on, meta, first_seen_at, last_seen_at, missing_since, missing_count, removed_at, archived_at, updated_at FROM entities;
+      DROP TABLE entities;
+      ALTER TABLE entities_v4 RENAME TO entities;
+      CREATE INDEX idx_entities_source ON entities(source, scope, lifecycle);
+      CREATE INDEX idx_entities_parent ON entities(parent_id);
+
+      -- Relationships as first-class, persistent records with their own lifecycle and evidence.
+      CREATE TABLE connections (
+        id                TEXT PRIMARY KEY,           -- stable: conn:<type>:<a>><b>
+        src               TEXT NOT NULL,
+        dst               TEXT NOT NULL,
+        type              TEXT NOT NULL,              -- lan|vpn|direct|internet|tunnel|proxy|dependency|database|api
+        source            TEXT NOT NULL,              -- what reported it: compose, tailscale, gateway, config, ingest
+        scope             TEXT NOT NULL,
+        verification      TEXT NOT NULL CHECK (verification IN ('verified','configured','observed','inferred','unverified')),
+        lifecycle         TEXT NOT NULL CHECK (lifecycle IN ('discovered','active','missing','removed','archived')),
+        health            TEXT NOT NULL DEFAULT 'unknown',
+        reason            TEXT,
+        evidence          TEXT NOT NULL DEFAULT '[]',
+        meta              TEXT NOT NULL DEFAULT '{}', -- measured only: latencyMs, lossPct, measuredAt, direct, relay, bytes
+        first_seen_at     TEXT NOT NULL,
+        last_seen_at      TEXT,
+        last_activity_at  TEXT,
+        missing_since     TEXT,
+        missing_count     INTEGER NOT NULL DEFAULT 0,
+        removed_at        TEXT,
+        archived_at       TEXT,
+        updated_at        TEXT NOT NULL
+      );
+      CREATE INDEX idx_connections_src ON connections(src);
+      CREATE INDEX idx_connections_dst ON connections(dst);
+      CREATE INDEX idx_connections_source ON connections(source, scope, lifecycle);
+    `,
+    down: `
+      DROP TABLE connections;
+      DELETE FROM entities WHERE kind IN ('gateway','external');
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database, target = MIGRATIONS.at(-1)!.version): void {
@@ -290,10 +346,19 @@ export function migrate(db: Database.Database, target = MIGRATIONS.at(-1)!.versi
   const current = (db.prepare('SELECT MAX(version) v FROM schema_migrations').get() as { v: number | null }).v ?? 0;
   if (target > current) {
     for (const m of MIGRATIONS.filter((m) => m.version > current && m.version <= target)) {
-      db.transaction(() => {
-        db.exec(m.up);
-        db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version, m.name, new Date().toISOString());
-      })();
+      if (m.foreignKeysOff) db.pragma('foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          db.exec(m.up);
+          if (m.foreignKeysOff) {
+            const broken = db.prepare('PRAGMA foreign_key_check').all();
+            if (broken.length) throw new Error(`migration ${m.version} left ${broken.length} broken foreign keys`);
+          }
+          db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version, m.name, new Date().toISOString());
+        })();
+      } finally {
+        if (m.foreignKeysOff) db.pragma('foreign_keys = ON');
+      }
     }
   } else if (target < current) {
     for (const m of [...MIGRATIONS].reverse().filter((m) => m.version <= current && m.version > target)) {

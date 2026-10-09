@@ -14,7 +14,7 @@ export type Health =
   | 'host_offline'
   | 'unknown';
 
-export type EntityKind = 'host' | 'project' | 'service' | 'endpoint';
+export type EntityKind = 'host' | 'project' | 'service' | 'endpoint' | 'gateway' | 'external';
 
 export type BuildingType =
   | 'server' // physical/virtual host
@@ -28,6 +28,8 @@ export type BuildingType =
   | 'clocktower' // scheduled task / background worker
   | 'cache' // redis / memcached
   | 'post' // mail
+  | 'gateway' // reverse proxy / tunnel / gateway
+  | 'port' // external third-party service (on the external island)
   | 'shop'; // fallback
 
 export type Origin = 'live' | 'demo';
@@ -96,7 +98,12 @@ export type EventType =
   | 'task.executed'
   | 'alert'
   | 'action.performed'
-  | 'layout.moved';
+  | 'layout.moved'
+  | 'connection.discovered'
+  | 'connection.missing'
+  | 'connection.removed'
+  | 'connection.degraded'
+  | 'connection.recovered';
 
 export interface WorldEvent {
   id: string;
@@ -165,6 +172,7 @@ export const BLOCK_PITCH = 7;
 export interface WorldSnapshot {
   mode: Origin;
   entities: EntityView[];
+  connections: ConnectionView[];
   blocks: BlockView[];
   adapters: AdapterStatus[];
   hints: HostnameHint[];
@@ -181,7 +189,8 @@ export type ServerMessage =
   | { t: 'adapters'; data: AdapterStatus[] }
   | { t: 'blocks'; data: BlockView[] }
   | { t: 'removed'; data: { id: string } }
-  | { t: 'hints'; data: HostnameHint[] };
+  | { t: 'hints'; data: HostnameHint[] }
+  | { t: 'connection'; data: ConnectionView };
 
 export const HEALTH_LABEL: Record<Health, string> = {
   healthy: 'Healthy',
@@ -369,3 +378,57 @@ export interface HostRegistration {
 }
 
 export interface MetricSeries { metric: string; source: string | null; resolution: 'raw' | 'hourly'; points: { ts: string; value: number; min?: number; max?: number }[] }
+
+// ---------------------------------------------------------------- topology
+
+/**
+ * - lan/vpn/direct: verified private network relationships between hosts → bridges
+ * - internet: known public-internet paths → ferries
+ * - tunnel/proxy: hops through gateways (reverse proxies, tunnels)
+ * - dependency/database/api: configured or observed application dependencies
+ */
+export type ConnectionType = 'lan' | 'vpn' | 'direct' | 'internet' | 'tunnel' | 'proxy' | 'dependency' | 'database' | 'api';
+
+/**
+ * - verified: confirmed by a source that observes the actual network state (e.g. `tailscale status` on the host)
+ * - configured: declared in configuration (compose depends_on, gateway routes, config file)
+ * - observed: real traffic was reported between the two
+ * - inferred / unverified: plausible but not confirmed — always drawn dashed and labelled
+ */
+export type Verification = 'verified' | 'configured' | 'observed' | 'inferred' | 'unverified';
+
+export interface ConnectionView {
+  id: string;
+  src: string;
+  dst: string;
+  type: ConnectionType;
+  source: string;
+  verification: Verification;
+  lifecycle: Lifecycle;
+  health: Health;
+  reason: string | null;
+  /** Human-readable facts supporting the relationship. */
+  evidence: string[];
+  /** Measured values only (never estimated). */
+  meta: { latencyMs?: number; lossPct?: number; measuredAt?: string; direct?: boolean; relay?: string | null; bytes?: number; label?: string; hostnames?: string[] };
+  firstSeenAt: string;
+  lastSeenAt: string | null;
+  lastActivityAt: string | null;
+}
+
+export const CONNECTION_LABEL: Record<ConnectionType, string> = {
+  lan: 'LAN', vpn: 'VPN', direct: 'Direct link', internet: 'Internet', tunnel: 'Tunnel', proxy: 'Reverse proxy', dependency: 'Depends on', database: 'Database', api: 'API call',
+};
+export const BRIDGE_TYPES: ConnectionType[] = ['lan', 'vpn', 'direct'];
+
+export interface RouteHop { entityId: string; via: ConnectionView | null }
+
+export type ImpactClass = 'confirmed' | 'likely' | 'unknown' | 'unaffected';
+export interface ImpactItem { entityId: string; class: ImpactClass; path: string[]; why: string }
+export interface ImpactReport {
+  root: string;
+  simulated: boolean;
+  items: ImpactItem[];
+  /** Plain-language summary; a cause is always labelled as a hypothesis unless verified. */
+  summary: string;
+}

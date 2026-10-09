@@ -1,6 +1,6 @@
 import { Application, Container, Graphics, Polygon, Sprite, Texture, TextureSource, TilingSprite } from 'pixi.js';
-import type { Biome, BlockView, EntityView, Health, WorldEvent } from '@berrie/shared';
-import { BLOCK_PITCH } from '@berrie/shared';
+import type { Biome, BlockView, ConnectionView, EntityView, Health, ImpactClass, WorldEvent } from '@berrie/shared';
+import { BLOCK_PITCH, BRIDGE_TYPES } from '@berrie/shared';
 import { effectiveHealth } from '@berrie/shared';
 import {
   buildingArt, ruinsArt, scaffoldArt, treeArt, rockArt, lampArt, signpostArt, lighthouseArt, boatArt, personArt,
@@ -21,6 +21,7 @@ export interface RendererCallbacks {
   onCameraSettled?: (camera: { x: number; y: number; zoom: number }) => void;
   /** Personal island arrangement: a whole island was dragged to a new offset (in tiles). */
   onIslandMoved?: (district: string, offset: { dx: number; dy: number }) => void;
+  onSelectConnection?: (id: string) => void;
 }
 
 /** Merged view of all islands, used for pathing, placement checks and bounds. */
@@ -70,6 +71,10 @@ export interface RenderState {
   biomes?: Record<string, Biome>;
   /** Personal "arrange islands" mode: drag whole islands. */
   arrangeIslands?: boolean;
+  connections?: ConnectionView[];
+  selectedConnection?: string | null;
+  /** Impact overlay: entity id → class. */
+  impact?: Map<string, ImpactClass> | null;
   /** Personal saved camera, used instead of fitting the whole world on first load. */
   initialCamera?: { x: number; y: number; zoom: number } | null;
 }
@@ -107,6 +112,7 @@ interface Courier {
 interface Particle { s: Sprite; vx: number; vy: number; life: number; max: number; grow: number }
 
 const PROBLEM: Health[] = ['unhealthy', 'unreachable', 'degraded', 'restarting'];
+const shadeNum = (c: number, f: number) => [16, 8, 0].reduce((acc, sh) => acc | (Math.min(255, Math.round(((c >> sh) & 255) * f)) << sh), 0);
 const isoX = (x: number, y: number) => (x - y) * (TW / 2);
 const isoY = (x: number, y: number) => (x + y) * (TH / 2);
 
@@ -117,6 +123,10 @@ export class WorldRenderer {
   private groundLayer = new Container();
   private islands = new Map<string, Island>();
   private arrangeGhost = new Graphics();
+  private linkLayer = new Container();
+  private highlight = new Graphics();
+  private ferries = new Map<string, Sprite>();
+  private ferryTrips = new Map<string, { start: number; reverse: boolean }>();
   private dragIsland: { district: string; start: [number, number]; delta: [number, number] } | null = null;
   private rings = new Graphics();
   private objects = new Container();
@@ -157,7 +167,7 @@ export class WorldRenderer {
     this.sea = new TilingSprite({ texture: this.seaFrames[0], width: this.app.screen.width, height: this.app.screen.height });
     this.objects.sortableChildren = true;
     this.lights.blendMode = 'add';
-    this.world.addChild(this.groundLayer, this.rings, this.shadowLayer, this.objects, this.effects, this.arrangeGhost);
+    this.world.addChild(this.groundLayer, this.linkLayer, this.rings, this.shadowLayer, this.highlight, this.objects, this.effects, this.arrangeGhost);
     this.worldTop.addChild(this.lights, this.cloudLayer);
     this.app.stage.addChild(this.sea, this.world, this.night, this.worldTop);
     this.setupInput();
@@ -221,6 +231,7 @@ export class WorldRenderer {
     const seen = new Set<string>();
     for (const e of withBuildings) { seen.add(e.id); this.syncBuilding(e, s, this.placed(e)); }
     for (const [id, n] of this.nodes) if (!seen.has(id)) { n.root.destroy({ children: true }); n.label.remove(); this.nodes.delete(id); }
+    this.drawLinks();
     this.drawRings();
     this.placeLabels();
     if (!this.fitted && this.terrain) {
@@ -388,6 +399,15 @@ export class WorldRenderer {
     const g = this.rings;
     g.clear();
     if (!this.state) return;
+    const IMPACT_COLOR: Record<ImpactClass, number> = { confirmed: 0xef4b4b, likely: 0xf2913d, unknown: 0x9aa3b5, unaffected: 0x3fd17a };
+    for (const [id, cls] of this.state.impact ?? []) {
+      const n = this.nodes.get(id);
+      if (!n) continue;
+      const { x, y, w, h } = n.rect;
+      const pad = 0.35;
+      const pts = [[x - pad, y - pad], [x + w + pad, y - pad], [x + w + pad, y + h + pad], [x - pad, y + h + pad]].flatMap(([a, b]) => [isoX(a, b), isoY(a, b)]);
+      g.poly(pts).fill({ color: IMPACT_COLOR[cls], alpha: cls === 'unknown' ? 0.08 : 0.16 }).stroke({ width: 2, color: IMPACT_COLOR[cls], alpha: cls === 'unknown' ? 0.5 : 0.95 });
+    }
     for (const n of this.nodes.values()) {
       const sel = n.id === this.state.selectedId;
       const prob = PROBLEM.includes(n.health) && n.entity.lifecycle !== 'removed';
@@ -398,6 +418,141 @@ export class WorldRenderer {
       const c = sel ? 0x7fd6ff : hexNum(HEALTH_COLOR[n.health]);
       g.poly(pts).fill({ color: c, alpha: sel ? 0.18 : 0.22 }).stroke({ width: sel ? 1.5 : 1, color: c, alpha: 0.9 });
     }
+  }
+
+  // ------------------------------------------------------------------ topology: bridges, ferries, routes, highlights
+
+  private centre(id: string): [number, number] | null {
+    const n = this.nodes.get(id);
+    return n ? [n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2] : null;
+  }
+
+  /** Trim a segment between two islands to the open water between their coastlines. */
+  private overWater(a: [number, number], b: [number, number], da: string, db: string): [[number, number], [number, number]] {
+    const la = this.islands.get(da)?.terrain.land, lb = this.islands.get(db)?.terrain.land;
+    const at = (t: number): [number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    const on = (land: Set<string> | undefined, p: [number, number]) => !!land?.has(`${Math.floor(p[0])},${Math.floor(p[1])}`);
+    const steps = Math.max(10, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) * 2));
+    let t0 = 0, t1 = 1;
+    for (let i = 0; i <= steps; i++) { if (!on(la, at(i / steps))) { t0 = Math.max(0, (i - 1) / steps); break; } }
+    for (let i = steps; i >= 0; i--) { if (!on(lb, at(i / steps))) { t1 = Math.min(1, (i + 1) / steps); break; } }
+    return t1 > t0 ? [at(t0), at(t1)] : [a, b];
+  }
+
+  private drawLinks(): void {
+    for (const c of this.linkLayer.removeChildren()) c.destroy();
+    this.highlight.clear();
+    const s = this.state;
+    if (!s?.connections) return;
+    const seenFerries = new Set<string>();
+    const strong = (c: ConnectionView) => c.verification === 'verified' || c.verification === 'configured';
+    for (const c of s.connections) {
+      if (c.lifecycle === 'removed') continue;
+      const na = this.nodes.get(c.src), nb = this.nodes.get(c.dst);
+      if (!na || !nb) continue;
+      const da = districtOf(na.entity), db = districtOf(nb.entity);
+      const selected = s.selectedConnection === c.id || s.selectedId === c.src || s.selectedId === c.dst;
+      const bad = c.health === 'unreachable' || c.health === 'unhealthy';
+      if (BRIDGE_TYPES.includes(c.type) && da !== db) {
+        const [p, q] = this.overWater(this.centre(c.src)!, this.centre(c.dst)!, da, db);
+        this.linkLayer.addChild(this.bridge(c, p, q, c.verification === 'verified', bad, selected));
+      } else if (c.type === 'internet' && da !== db) {
+        const [p, q] = this.overWater(this.centre(c.src)!, this.centre(c.dst)!, da, db);
+        this.linkLayer.addChild(this.seaLane(c, p, q, strong(c), bad, selected));
+        seenFerries.add(c.id);
+        let f = this.ferries.get(c.id);
+        if (!f) {
+          const a = this.art('ferry', boatArt);
+          f = new Sprite(this.artTex('prop:boat', a));
+          f.anchor.set(0.5, 0.8);
+          f.eventMode = 'static';
+          f.cursor = 'pointer';
+          const id = c.id;
+          f.on('pointertap', () => this.cb.onSelectConnection?.(id));
+          this.objects.addChild(f);
+          this.ferries.set(c.id, f);
+        }
+        f.label = `ferry:${p[0]},${p[1]},${q[0]},${q[1]}`;
+        f.tint = bad ? 0xff9a8a : 0xffffff;
+      } else if (c.type === 'proxy' && bad) {
+        // A failing gateway hop: highlight the affected route on the island.
+        this.dashed(this.highlight, this.centre(c.src)!, this.centre(c.dst)!, 0xef4b4b, 0.9, 1.5);
+      }
+    }
+    for (const [id, f] of this.ferries) if (!seenFerries.has(id)) { f.destroy(); this.ferries.delete(id); }
+    // Selected entity: upstream (what it relies on) in blue, downstream (what relies on it) in orange.
+    const sel = s.selectedId;
+    if (sel && this.nodes.has(sel)) {
+      for (const c of s.connections) {
+        if (c.lifecycle === 'removed' || (c.src !== sel && c.dst !== sel)) continue;
+        const other = c.src === sel ? c.dst : c.src;
+        const a = this.centre(sel), b = this.centre(other);
+        if (!a || !b) continue;
+        const color = c.src === sel ? 0x5ab0ff : 0xf2913d;
+        if (strong(c) || c.verification === 'observed') this.solid(this.highlight, a, b, color, 0.85, 1.6);
+        else this.dashed(this.highlight, a, b, color, 0.7, 1.4);
+      }
+      const e = this.nodes.get(sel)!.entity;
+      if (e.hostId && e.hostId !== e.id && this.nodes.has(e.hostId)) this.dashed(this.highlight, this.centre(sel)!, this.centre(e.hostId)!, 0x9aa3b5, 0.5, 1);
+    }
+  }
+
+  private iso(p: [number, number]): [number, number] { return [isoX(p[0], p[1]), isoY(p[0], p[1])]; }
+
+  private solid(g: Graphics, a: [number, number], b: [number, number], color: number, alpha: number, width: number): void {
+    const [ax, ay] = this.iso(a), [bx, by] = this.iso(b);
+    g.moveTo(ax, ay).lineTo(bx, by).stroke({ width, color, alpha });
+  }
+
+  private dashed(g: Graphics, a: [number, number], b: [number, number], color: number, alpha: number, width: number): void {
+    const [ax, ay] = this.iso(a), [bx, by] = this.iso(b);
+    const len = Math.hypot(bx - ax, by - ay), n = Math.max(2, Math.floor(len / 10));
+    for (let i = 0; i < n; i += 2) {
+      const t0 = i / n, t1 = Math.min(1, (i + 1) / n);
+      g.moveTo(ax + (bx - ax) * t0, ay + (by - ay) * t0).lineTo(ax + (bx - ax) * t1, ay + (by - ay) * t1);
+    }
+    g.stroke({ width, color, alpha });
+  }
+
+  /** Plank bridge across the water. Unverified links are translucent with gaps, so they never look like a real bridge. */
+  private bridge(c: ConnectionView, p: [number, number], q: [number, number], verified: boolean, bad: boolean, selected: boolean): Graphics {
+    const g = new Graphics();
+    const [ax, ay] = this.iso(p), [bx, by] = this.iso(q);
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    const nx = -(by - ay) / len, ny = (bx - ax) / len;
+    const w = 7;
+    const deck = [ax + nx * w, ay + ny * w, bx + nx * w, by + ny * w, bx - nx * w, by - ny * w, ax - nx * w, ay - ny * w];
+    const wood = 0x8a6a44, rail = bad ? 0xef4b4b : selected ? 0x7fd6ff : 0x5a4330;
+    const alpha = verified ? 1 : 0.45;
+    if (verified) g.poly(deck).fill({ color: wood, alpha });
+    const planks = Math.floor(len / 3);
+    for (let i = 0; i < planks; i++) {
+      if (!verified && i % 3 === 2) continue; // gaps: not a confirmed bridge
+      const t = i / planks, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+      g.moveTo(x + nx * w, y + ny * w).lineTo(x - nx * w, y - ny * w);
+    }
+    g.stroke({ width: 1.5, color: shadeNum(wood, 1.25), alpha });
+    for (const side of [1, -1]) g.moveTo(ax + nx * w * side, ay + ny * w * side - 3).lineTo(bx + nx * w * side, by + ny * w * side - 3);
+    g.stroke({ width: selected ? 3 : 2, color: rail, alpha: verified ? 0.95 : 0.7 });
+    g.eventMode = 'static';
+    g.cursor = 'pointer';
+    g.hitArea = new Polygon(deck);
+    g.on('pointertap', () => { if (!this.dragMoved) this.cb.onSelectConnection?.(c.id); });
+    return g;
+  }
+
+  /** Dashed sea lane for a known internet route; a ferry rides on it. */
+  private seaLane(c: ConnectionView, p: [number, number], q: [number, number], strong: boolean, bad: boolean, selected: boolean): Graphics {
+    const g = new Graphics();
+    this.dashed(g, p, q, bad ? 0xef4b4b : selected ? 0x7fd6ff : 0xe8f4ff, strong ? 0.75 : 0.4, selected ? 4 : 3);
+    const [ax, ay] = this.iso(p), [bx, by] = this.iso(q);
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    const nx = -(by - ay) / len * 6, ny = (bx - ax) / len * 6;
+    g.eventMode = 'static';
+    g.cursor = 'pointer';
+    g.hitArea = new Polygon([ax + nx, ay + ny, bx + nx, by + ny, bx - nx, by - ny, ax - nx, ay - ny]);
+    g.on('pointertap', () => { if (!this.dragMoved) this.cb.onSelectConnection?.(c.id); });
+    return g;
   }
 
   // ------------------------------------------------------------------ labels (DOM overlay)
@@ -459,6 +614,12 @@ export class WorldRenderer {
     const from = ev.entityId ? this.nodes.get(ev.entityId) : undefined;
     const to = ev.relatedEntityId ? this.nodes.get(ev.relatedEntityId) : undefined;
     const c = (from ?? to)?.rect;
+    // A real request to a public endpoint behind a tunnel sails the ferry once.
+    if (ev.type === 'http.request' && ev.entityId) {
+      for (const c of this.state?.connections ?? []) {
+        if (c.type === 'internet' && (c.meta.hostnames ?? []).some((h) => ev.entityId === `endpoint:${h}`)) this.ferryTrips.set(c.id, { start: this.time, reverse: false });
+      }
+    }
     switch (ev.type) {
       case 'http.request': if (from && to) this.courier(from.rect, to.rect, 'person', 0xffffff, 0xf4f0e8); break;
       case 'ai.request_started': if (from && to) this.courier(from.rect, to.rect, 'person', 0x8a5cf0, 0xc9b8ff); break;
@@ -647,6 +808,19 @@ export class WorldRenderer {
     }
     // boats bob
     for (const p of this.props) if (p.label === 'boat') p.pivot.y = Math.sin(this.time / 700 + p.x) * 1.2;
+    // Ferries rest mid-lane and only cross when a real event uses the route (see onEvent).
+    for (const [id, f] of this.ferries) {
+      const m = /^ferry:([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)$/.exec(f.label ?? '');
+      if (!m) continue;
+      const [x0, y0, x1, y1] = m.slice(1).map(Number);
+      const trip = this.ferryTrips.get(id);
+      let t = 0.5;
+      if (trip) { t = Math.min(1, (this.time - trip.start) / 4000); if (trip.reverse) t = 1 - t; if (this.time - trip.start > 4000) this.ferryTrips.delete(id); }
+      const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
+      f.position.set(isoX(x, y), isoY(x, y) + Math.sin(this.time / 600) * 1.2);
+      f.zIndex = (x + y) * 10;
+      f.scale.x = isoX(x1, y1) < isoX(x0, y0) ? -1 : 1;
+    }
   }
 
   // ------------------------------------------------------------------ camera & input

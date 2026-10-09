@@ -5,13 +5,14 @@ const RULES: [RegExp, BuildingType][] = [
   [/n8n|node-?red|huginn|activepieces|windmill|automat/i, 'workshop'],
   [/postgres|mysql|mariadb|mongo|clickhouse|influx|timescale|couch|cockroach|sqlite|\bdb\b|database/i, 'silo'],
   [/redis|memcache|valkey|keydb|dragonfly/i, 'cache'],
-  [/cloudflared|tunnel|traefik|caddy|haproxy|nginx-proxy|proxy|tailscale|wireguard|pihole|adguard|\bdns\b|nginx/i, 'tower'],
+  [/cloudflared|traefik|caddy|haproxy|nginx-proxy-manager|\btunnel\b|envoy/i, 'gateway'],
+  [/nginx-proxy|proxy|tailscale|wireguard|pihole|adguard|\bdns\b|nginx/i, 'tower'],
   [/minio|nextcloud|seafile|syncthing|filebrowser|samba|share|files?|storage|backup|restic/i, 'depot'],
   [/worker|scheduler|cron|celery|queue|sidekiq|ofelia|beat|jobs?\b/i, 'clocktower'],
   [/mail|smtp|postfix|dovecot/i, 'post'],
 ];
 
-const VALID = new Set<BuildingType>(['server', 'townhall', 'house', 'lab', 'workshop', 'silo', 'tower', 'depot', 'clocktower', 'cache', 'post', 'shop']);
+const VALID = new Set<BuildingType>(['server', 'townhall', 'house', 'lab', 'workshop', 'silo', 'tower', 'depot', 'clocktower', 'cache', 'post', 'gateway', 'port', 'shop']);
 
 export function isBuildingType(v: unknown): v is BuildingType {
   return typeof v === 'string' && VALID.has(v as BuildingType);

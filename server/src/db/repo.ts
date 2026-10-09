@@ -10,6 +10,7 @@ import { BLOCK_PITCH } from '@berrie/shared';
 import { migrate } from './migrations.js';
 import { Users } from './users.js';
 import { HostRegistry } from './hosts.js';
+import { ConnectionStore } from './connections.js';
 
 export interface EntityRow {
   id: string;
@@ -121,6 +122,7 @@ export class Repo {
   readonly db: Database.Database;
   readonly users: Users;
   readonly hosts: HostRegistry;
+  readonly connections: ConnectionStore;
 
   constructor(
     path: string,
@@ -135,6 +137,7 @@ export class Repo {
     migrate(this.db);
     this.users = new Users(this.db, () => this.now());
     this.hosts = new HostRegistry(this.db, () => this.now());
+    this.connections = new ConnectionStore(this.db, () => this.now());
     // A database belongs to exactly one mode; refuse to open the live DB in demo mode or vice versa.
     const stored = this.getSetting('origin');
     if (!stored) this.setSetting('origin', mode);

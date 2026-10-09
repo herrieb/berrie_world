@@ -416,6 +416,60 @@ function shop(seed: number): SpriteArt {
   return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [top[0], top[1]] };
 }
 
+/** Gatehouse for reverse proxies and tunnels: two stone towers, an arch with a portcullis, banner on top. */
+function gateway(seed: number): SpriteArt {
+  const h = 30;
+  const px = canvasFor(2, 2, h + 30);
+  shadowPad(px, 2, 2);
+  const rock = hash2(seed, 2) > 0.5 ? hex(0x9a9286) : hex(0x8a8f99);
+  const tower = (x0: number, y0: number) => {
+    px.box(x0, y0, x0 + 0.5, y0 + 0.5, 0, h, faces(rock), { left: leftWall(px, y0 + 0.5, stone(rock, 0.98)), right: rightWall(px, x0 + 0.5, stone(rock, 0.74)) });
+    // crenellations
+    for (const [dx, dy] of [[0, 0], [0.3, 0], [0, 0.3], [0.3, 0.3]]) px.box(x0 + dx, y0 + dy, x0 + dx + 0.2, y0 + dy + 0.2, h, h + 4, faces(shade(rock, 1.05)));
+  };
+  // back tower, arch wall, front tower (painter's order)
+  tower(0.3, 0.25);
+  px.box(0.55, 0.75, 1.45, 1.25, 0, h - 8, faces(rock), { left: leftWall(px, 1.25, stone(rock, 0.96)), right: rightWall(px, 1.45, stone(rock, 0.72)) });
+  // arch opening with portcullis on the front (south-west) face
+  px.winL(1.25, 0.72, 1.28, 0, 14, hex(0x1b1f2a));
+  for (let x = 0.76; x < 1.26; x += 0.1) px.wpoly([[x, 1.25, 0], [x + 0.02, 1.25, 0], [x + 0.02, 1.25, 14], [x, 1.25, 14]], hex(0x6d6a63));
+  for (let z = 3; z < 14; z += 3) px.wpoly([[0.72, 1.25, z], [1.28, 1.25, z], [1.28, 1.25, z + 0.7], [0.72, 1.25, z + 0.7]], hex(0x6d6a63));
+  px.wpoly([[0.7, 1.25, 14], [1.3, 1.25, 14], [1.3, 1.25, 16], [0.7, 1.25, 16]], shade(rock, 0.8));
+  tower(1.2, 1.25);
+  // banner pole and flag on the front tower
+  const base = px.p(1.45, 1.5, h + 4), topP = px.p(1.45, 1.5, h + 22);
+  line(px, base, topP, hex(0xc8c0b0));
+  const flag = hash2(seed, 5) > 0.5 ? hex(0xf2913d) : hex(0x4aa8ff);
+  for (let y = 0; y < 6; y++) for (let x = 1; x < 9 - y * 0.6; x++) px.set(topP[0] + x, topP[1] + y + Math.round(Math.sin(x * 0.8) * 0.6), shade(flag, 1 - y * 0.04));
+  px.outline(OUT);
+  return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [topP[0], topP[1] - 3] };
+}
+
+/** Harbour port for third-party services on the external island: pier, warehouse and a crane. */
+function port(seed: number): SpriteArt {
+  const px = canvasFor(2, 2, 50);
+  shadowPad(px, 2, 2);
+  const wood = hex(0x8a6a44);
+  // pier deck with posts
+  px.box(0.1, 0.1, 1.9, 1.9, 0, 3, faces(wood));
+  for (let u = 0.2; u < 1.9; u += 0.22) px.wpoly([[u, 1.9, 0], [u + 0.03, 1.9, 0], [u + 0.03, 1.9, 3], [u, 1.9, 3]], shade(wood, 0.7));
+  // warehouse
+  const wall = hash2(seed, 3) > 0.5 ? hex(0xb8573e) : hex(0x4f7a9a);
+  px.box(0.25, 0.25, 1.15, 1.25, 3, 17, faces(wall), { left: leftWall(px, 1.25, corrugated(wall, 0.96)), right: rightWall(px, 1.15, corrugated(wall, 0.72)) });
+  px.winL(1.25, 0.45, 0.95, 3, 13, hex(0x3a3d45), hex(0x2a2c33));
+  px.box(0.2, 0.2, 1.2, 1.3, 17, 19, faces(hex(0x7a7f88)));
+  // crane
+  const steel = hex(0xf2b33d);
+  const c0 = px.p(1.55, 0.6, 3), c1 = px.p(1.55, 0.6, 40), arm = px.p(1.05, 1.55, 40);
+  line(px, c0, c1, steel);
+  line(px, [c0[0] + 1, c0[1]], [c1[0] + 1, c1[1]], shade(steel, 0.8));
+  line(px, c1, arm, steel);
+  line(px, arm, [arm[0], arm[1] + 14], hex(0x3a3f4c));
+  px.box(1.0, 1.5, 1.12, 1.62, 3, 7, faces(hex(0x4aa8ff)));
+  px.outline(OUT);
+  return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [c1[0], c1[1] - 3] };
+}
+
 export function buildingArt(type: BuildingType, seed: number, opts: { tier?: number | null } = {}): SpriteArt {
   switch (type) {
     case 'server': return server(seed, opts.tier ?? null);
@@ -427,6 +481,8 @@ export function buildingArt(type: BuildingType, seed: number, opts: { tier?: num
     case 'depot': return depot(seed);
     case 'clocktower': return clocktower(seed);
     case 'post': return post(seed);
+    case 'gateway': return gateway(seed);
+    case 'port': return port(seed);
     case 'shop': return shop(seed);
     case 'house':
     case 'townhall':

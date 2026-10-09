@@ -108,6 +108,37 @@ when unknown); a pressure marker appears for collected memory/disk ≥ 90 %, CPU
 Agent install (shown in Harbor with the token): an unprivileged `berrie-agent` user, `/usr/local/bin/berrie-agent`,
 a 0600 `/etc/berrie-agent.env`, and a systemd timer (hardened unit: `NoNewPrivileges`, `ProtectSystem=strict`).
 
+## Topology: bridges, ferries, gateways
+
+Relationships are stored as first-class connections (own lifecycle, evidence, history) and reconciled like entities:
+only complete reports from their source can make one *missing*, and removal needs repeated confirmation.
+
+| Drawn as | Type | Source | Verification |
+|---|---|---|---|
+| Bridge between islands | `vpn` (also `lan`, `direct`) | `tailscale status` reported by a host's collector (SSH/agent) | verified |
+| Ferry on a sea lane | `internet` (Cloudflare edge → tunnel gateway) | `gateways` in config; verified when a collector sees `cloudflared` running | verified / configured |
+| Gatehouse building | gateway (`proxy` hops to services) | `gateways[].routes` matched against public endpoints | configured |
+| Lines on selection | `dependency` / `database` | Compose `depends_on` | configured |
+| Lines on selection | `api` | traffic reported through the ingest API | observed |
+| Dashed / translucent | anything not verified | config `connections`, observed traffic | configured / observed |
+| Port on the external island | external service | `externals` in config, the Cloudflare edge | — |
+
+Nothing is inferred from reachability: two servers that can talk to each other get no bridge unless a source reports
+the relationship. A failing gateway turns its routes red and marks dependent endpoints as *likely affected* — their own
+health stays what their own checks say.
+
+The inspector's **Dependencies** tab has a route explorer (public hostname → edge → gateway → application, each hop with
+its verification), upstream/downstream lists with evidence, and **impact analysis**: *confirmed* (own checks failing),
+*likely* (reached via verified/configured links), *unknown* (via unverified links) and *verified fine*. **Simulate
+failure** runs the same analysis as a pure calculation and never touches infrastructure. Suspected causes are always
+labelled as hypotheses. Click a bridge or ferry to inspect it (evidence, configured vs. observed, measured values only).
+
+```json
+"gateways": [{ "id": "cloudflared", "name": "Cloudflare Tunnel", "host": "srv01", "kind": "cloudflare-tunnel", "routes": ["*.example.com"] }],
+"externals": [{ "id": "openai", "name": "OpenAI API", "hostnames": ["api.openai.com"] }],
+"connections": [{ "from": "srv01", "to": "nas", "type": "lan", "description": "same switch" }]
+```
+
 ## Configuration
 
 Environment (see `.env.example`): `ADMIN_TOKEN` (bootstrap), `BERRIE_MASTER_KEY`, `SESSION_DAYS`, `SESSION_IDLE_HOURS`,

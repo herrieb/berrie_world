@@ -7,6 +7,7 @@ import type { DemoAdapter } from '../adapters/demo.js';
 import { redactError } from './redact.js';
 import type { World } from './world.js';
 import { HostManager, type TransportFactory } from './hosts.js';
+import { buildTopology } from './topology.js';
 import type { SecretBox } from './secrets.js';
 
 interface ScheduledCheck {
@@ -124,13 +125,24 @@ export class Scheduler {
         // Re-run host inventories so metadata from Docker /info and collectors is attached.
         this.safe('config', () => this.world.reconcile(configInventory(this.cfg, describe())));
         this.safe('harbor', () => this.world.reconcile(this.hosts.hostInventory()));
+        let checks: { entityId: string; check: CheckConfig }[] = [];
         try {
           const plan = await endpointInventory(this.cfg, this.world.repo);
           this.world.reconcile(plan.inventory);
-          this.syncChecks(plan.checks);
+          checks = plan.checks;
         } catch (err) {
           this.log('endpoint adapter failed', { error: redactError(err) });
         }
+        // Topology runs after hosts, containers and endpoints so its relationships reference current entities.
+        try {
+          const topo = buildTopology(this.cfg, this.world.repo, this.hosts);
+          this.world.reconcile(topo.entities);
+          for (const inv of topo.connections) this.world.reconcileConnections(inv);
+          checks = [...checks, ...topo.checks];
+        } catch (err) {
+          this.log('topology failed', { error: redactError(err) });
+        }
+        this.syncChecks(checks);
         try {
           this.hints = await hintStatus(this.cfg, this.world.repo);
           this.hooks.hints?.(this.hints);
@@ -139,6 +151,7 @@ export class Scheduler {
         }
       }
       this.world.archivePass();
+      this.world.archiveConnectionsPass();
       this.hooks.adapters?.(this.world.repo.listAdapterStates());
     } catch (err) {
       this.log('discovery cycle failed', { error: redactError(err) });

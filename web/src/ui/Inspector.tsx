@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { EntityView, WorldEvent } from '@berrie/shared';
-import { HEALTH_LABEL, LIFECYCLE_LABEL, effectiveHealth } from '@berrie/shared';
+import type { ConnectionView, EntityView, ImpactReport, WorldEvent } from '@berrie/shared';
+import { CONNECTION_LABEL, HEALTH_LABEL, LIFECYCLE_LABEL, effectiveHealth } from '@berrie/shared';
 import { useStore, useRole } from '../state/store';
 import { api, ApiError, toggleFavorite } from '../state/api';
 import { Icon } from './Icon';
@@ -8,6 +8,7 @@ import { HEALTH_COLOR, TYPE_LABEL, fmtBytes, fmtTime, iconSvg, statusText, timeA
 import { describeEvent, eventColor } from './events';
 import { HostFactsPanel } from './HostFactsPanel';
 import { MetricChart } from './MetricChart';
+import { IMPACT_TEXT, VERIFICATION_TEXT } from './topologyText';
 import { fmtDuration, hostFacts, known } from './facts';
 
 interface Detail {
@@ -323,25 +324,86 @@ function LogsTab({ e }: { e: EntityView }) {
   );
 }
 
+interface RouteInfo {
+  routes: { entityId: string; via: ConnectionView | null }[][];
+  upstream: { entityId: string; connection: ConnectionView | null; why: string }[];
+  downstream: { entityId: string; connection: ConnectionView | null; why: string }[];
+}
+
 function DepsTab({ e, detail }: { e: EntityView; detail: Detail | null }) {
   const entities = useStore((s) => s.entities);
   const select = useStore((s) => s.select);
-  const chain: EntityView[] = [];
-  for (let p = e.parentId ? entities[e.parentId] : undefined; p && chain.length < 5; p = p.parentId && p.parentId !== p.id ? entities[p.parentId] : undefined) chain.unshift(p);
-  const deps = e.dependsOn.map((id) => entities[id]).filter(Boolean);
-  const dependents = Object.values(entities).filter((x) => x.dependsOn.includes(e.id));
-  const siblings = e.parentId ? Object.values(entities).filter((x) => x.parentId === e.parentId && x.id !== e.id && x.kind === 'service') : [];
-  const Row = ({ x }: { x: EntityView }) => (
-    <li><button onClick={() => select(x.id, true)}><span className="dot" style={{ background: HEALTH_COLOR[effectiveHealth(x)] }} /><span className="grow">{x.displayName}<small>{TYPE_LABEL[x.buildingType]} · {statusText(x).text}</small></span><Icon name="chevron" size={14} /></button></li>
-  );
+  const impact = useStore((s) => s.impact);
+  const setImpact = useStore((s) => s.setImpact);
+  const [route, setRoute] = useState<RouteInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api<RouteInfo>(`/api/entities/${encodeURIComponent(e.id)}/route`).then(setRoute).catch(() => setRoute({ routes: [], upstream: [], downstream: [] }));
+  }, [e.id, e.health]);
+  const name = (id: string) => entities[id]?.displayName ?? id;
+  const Badge = ({ c }: { c: ConnectionView | null }) => (c ? <span className={`vbadge v-${c.verification}`} title={VERIFICATION_TEXT[c.verification].help}>{c.verification}</span> : <span className="vbadge v-configured" title="Structural fact (containment or configured route)">fact</span>);
+  const Rel = ({ id, c, why }: { id: string; c: ConnectionView | null; why: string }) => {
+    const x = entities[id];
+    return (
+      <li><button onClick={() => select(id, true)}>
+        <span className="dot" style={{ background: x ? HEALTH_COLOR[effectiveHealth(x)] : '#888' }} />
+        <span className="grow">{name(id)}<small>{why}</small></span><Badge c={c} />
+      </button></li>
+    );
+  };
+  const run = async (simulate: boolean) => {
+    setBusy(true);
+    try { setImpact(await api<ImpactReport>(`/api/impact/${encodeURIComponent(e.id)}${simulate ? '?simulate=true' : ''}`)); } finally { setBusy(false); }
+  };
+  const mine = impact?.root === e.id ? impact : null;
   return (
     <>
-      <section><h4>Hierarchy</h4><p className="crumbs">{[...chain, e].map((x) => x.displayName).join(' → ')}</p></section>
-      <section><h4>Depends on</h4>{deps.length ? <ul className="rel-list">{deps.map((x) => <Row key={x.id} x={x} />)}</ul> : <p className="muted">No declared dependencies.</p>}</section>
-      <section><h4>Used by</h4>{dependents.length ? <ul className="rel-list">{dependents.map((x) => <Row key={x.id} x={x} />)}</ul> : <p className="muted">Nothing declares a dependency on this.</p>}</section>
-      {siblings.length > 0 && <section><h4>Same project</h4><ul className="rel-list">{siblings.map((x) => <Row key={x.id} x={x} />)}</ul></section>}
-      {!!detail?.children.length && <section><h4>Children</h4><ul className="rel-list">{detail.children.map((x) => <Row key={x.id} x={x} />)}</ul></section>}
-      <p className="muted small">Dependencies come from Compose <code>depends_on</code> labels and tunnel/endpoint routing. A failing dependency does not change this service's own health.</p>
+      {!!route?.routes.length && (
+        <section>
+          <h4>Route explorer — public path{route.routes.length > 1 ? 's' : ''}</h4>
+          {route.routes.map((hops, i) => (
+            <ol key={i} className="route">
+              {hops.map((h, j) => {
+                const x = entities[h.entityId];
+                return (
+                  <li key={j}>
+                    {h.via && <span className="hop">{CONNECTION_LABEL[h.via.type]} <span className={`vbadge v-${h.via.verification}`}>{h.via.verification}</span>{h.via.health !== 'unknown' && <span className="dot" style={{ background: HEALTH_COLOR[h.via.health] }} />}</span>}
+                    <button onClick={() => select(h.entityId, true)}><span className="dot" style={{ background: x ? HEALTH_COLOR[effectiveHealth(x)] : '#888' }} />{name(h.entityId)}<small>{x ? TYPE_LABEL[x.buildingType] : ''}</small></button>
+                  </li>
+                );
+              })}
+            </ol>
+          ))}
+          <p className="muted small">Only hops that are configured or verified are shown; nothing is guessed from reachability.</p>
+        </section>
+      )}
+      <section><h4>Relies on (upstream)</h4>{route?.upstream.length ? <ul className="rel-list">{route.upstream.map((u) => <Rel key={u.entityId} id={u.entityId} c={u.connection} why={u.why} />)}</ul> : <p className="muted">No known dependencies.</p>}</section>
+      <section><h4>Relied on by (downstream)</h4>{route?.downstream.length ? <ul className="rel-list">{route.downstream.map((d) => <Rel key={d.entityId} id={d.entityId} c={d.connection} why={d.why} />)}</ul> : <p className="muted">Nothing known relies on this.</p>}</section>
+      {!!detail?.children.length && <section><h4>Children</h4><ul className="rel-list">{detail.children.map((x) => <Rel key={x.id} id={x.id} c={null} why={TYPE_LABEL[x.buildingType]} />)}</ul></section>}
+      <section>
+        <h4>Impact analysis</h4>
+        <div className="row">
+          <button disabled={busy} onClick={() => void run(false)}><Icon name="activity" /> Analyse impact</button>
+          <button disabled={busy} onClick={() => void run(true)} title="Pure calculation — no real infrastructure is touched"><Icon name="flame" /> Simulate failure</button>
+          {mine && <button className="link-btn" onClick={() => setImpact(null)}>Clear map overlay</button>}
+        </div>
+        {mine && (
+          <div className="impact">
+            <p className={mine.simulated ? 'callout gray' : 'callout amber'}>{mine.summary}</p>
+            {(['confirmed', 'likely', 'unknown', 'unaffected'] as const).map((cls) => {
+              const items = mine.items.filter((i) => i.class === cls);
+              if (!items.length) return null;
+              return (
+                <div key={cls}>
+                  <h5 style={{ color: IMPACT_TEXT[cls].color }}>{IMPACT_TEXT[cls].label} ({items.length})</h5>
+                  <ul className="rel-list">{items.map((i) => <li key={i.entityId}><button onClick={() => select(i.entityId, true)}><span className="dot" style={{ background: IMPACT_TEXT[cls].color }} /><span className="grow">{name(i.entityId)}<small>{i.why}{i.path.length > 2 ? ` · via ${i.path.slice(1, -1).map(name).join(' → ')}` : ''}</small></span></button></li>)}</ul>
+                </div>
+              );
+            })}
+            {!mine.items.length && <p className="muted">Nothing known depends on this.</p>}
+          </div>
+        )}
+      </section>
     </>
   );
 }

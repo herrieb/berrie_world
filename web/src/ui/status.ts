@@ -17,7 +17,7 @@ export const hexNum = (c: string) => Number.parseInt(c.slice(1), 16);
 export const TYPE_LABEL: Record<BuildingType, string> = {
   server: 'Server', townhall: 'Project', house: 'Website / app', lab: 'AI service', workshop: 'Automation',
   silo: 'Database', tower: 'Network / proxy', depot: 'File storage', clocktower: 'Worker / scheduler',
-  cache: 'Cache', post: 'Mail', shop: 'Service',
+  cache: 'Cache', post: 'Mail', gateway: 'Gateway / tunnel', port: 'External service', shop: 'Service',
 };
 
 /** Tiny inline SVG glyphs per building type (24x24 viewBox, currentColor). */
@@ -34,6 +34,8 @@ export const TYPE_ICON: Record<BuildingType, string> = {
   cache: '<path d="M13 2 5 13h6l-1 9 8-11h-6z"/>',
   post: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
   shop: '<path d="M4 9h16l-1-5H5z"/><path d="M5 9v11h14V9"/><path d="M10 20v-6h4v6"/>',
+  gateway: '<path d="M4 21V7l3-2 3 2v14M14 21V7l3-2 3 2v14"/><path d="M10 12h4M10 21v-5a2 2 0 0 1 4 0v5"/>',
+  port: '<path d="M2 20c2 1 4 1 6 0s4-1 6 0 4 1 6 0"/><path d="M5 17V9h7v8M15 17V4l5 3h-5"/>',
 };
 
 export function iconSvg(t: BuildingType, size = 16): string {

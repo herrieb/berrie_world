@@ -4,6 +4,7 @@ import { useStore, matchesFilters, filtersActive, useRole } from '../state/store
 import { onServerMessage, api, savePrefs } from '../state/api';
 import { WorldRenderer } from '../world/WorldRenderer';
 import { Inspector } from './Inspector';
+import { ConnectionInspector } from './ConnectionInspector';
 import { ActivityPanel } from './ActivityPanel';
 import { Minimap } from './Minimap';
 import { Icon } from './Icon';
@@ -24,7 +25,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
 
   useEffect(() => {
     const r = new WorldRenderer(hostRef.current!, labelRef.current!, {
-      onSelect: (id) => useStore.getState().select(id),
+      onSelect: (id) => { const st = useStore.getState(); if (!id) st.selectConnection(null); st.select(id); },
       onMove: async (id, x, y) => {
         try { await api(`/api/entities/${encodeURIComponent(id)}/layout`, { method: 'PUT', json: { x, y } }); }
         catch (e) { setToast(`Move rejected: ${(e as Error).message}`); }
@@ -32,6 +33,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       onCamera: () => setCamTick((t) => t + 1),
       // Camera position is personal; persisted (debounced) so it follows the user across devices.
       onCameraSettled: (camera) => savePrefs({ camera }),
+      onSelectConnection: (id) => useStore.getState().selectConnection(id),
       onIslandMoved: (district, offset) => {
         const cur = useStore.getState().prefs.islandOffsets ?? {};
         savePrefs({ islandOffsets: { ...cur, [district]: offset } });
@@ -46,6 +48,8 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
 
   const matching = useMemo(() => (filtersActive(s.filters) ? new Set(list.filter((e) => matchesFilters(e, s.filters)).map((e) => e.id)) : null), [list, s.filters]);
 
+  const connList = useMemo(() => Object.values(s.connections), [s.connections]);
+  const impactMap = useMemo(() => (s.impact ? new Map(s.impact.items.map((i) => [i.entityId, i.class])) : null), [s.impact]);
   const biomes = useMemo(() => Object.fromEntries(list.filter((e) => e.kind === 'host' && (e.meta.appearance as { biome?: string } | undefined)?.biome).map((e) => [e.id, (e.meta.appearance as { biome: Biome }).biome])), [list]);
 
   useEffect(() => {
@@ -54,8 +58,9 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout,
       labelDensity: s.prefs.labelDensity ?? 'auto', initialCamera: s.prefs.camera ?? null,
       offsets: s.prefs.islandOffsets ?? {}, biomes, arrangeIslands: arrange,
+      connections: connList, selectedConnection: s.selectedConnection, impact: impactMap,
     });
-  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera, s.prefs.islandOffsets, biomes, arrange]);
+  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera, s.prefs.islandOffsets, biomes, arrange, connList, s.selectedConnection, impactMap]);
 
   useEffect(() => { if (ready && s.selectedId && s.focusTick) rendererRef.current?.focus(s.selectedId); }, [s.focusTick, ready]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
@@ -145,7 +150,9 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       {toast && <div className="toast">{toast}</div>}
 
       <aside className="sidepanel">
-        {selected ? <Inspector entity={selected} onClose={() => s.select(null)} /> : <ActivityPanel alerts={alerts} />}
+        {selected ? <Inspector entity={selected} onClose={() => s.select(null)} />
+          : s.selectedConnection && s.connections[s.selectedConnection] ? <ConnectionInspector c={s.connections[s.selectedConnection]} onClose={() => s.selectConnection(null)} />
+          : <ActivityPanel alerts={alerts} />}
       </aside>
 
       {s.loaded && !s.connected && s.mode === 'live' && (

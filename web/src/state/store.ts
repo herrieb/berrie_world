@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type {
-  AdapterStatus, Alert, BlockView, BuildingType, EntityView, Health, HostnameHint, Me, Origin, Role, SavedView, ServerMessage, Severity, UserPrefs, WorldEvent,
+  AdapterStatus, Alert, BlockView, BuildingType, ConnectionView, EntityView, Health, HostnameHint, ImpactReport, Me, Origin, Role, SavedView, ServerMessage, Severity, UserPrefs, WorldEvent,
 } from '@berrie/shared';
 import { ROLE_RANK, effectiveHealth } from '@berrie/shared';
 
@@ -22,6 +22,10 @@ interface State {
   connected: boolean;
   actionsEnabled: boolean;
   entities: Record<string, EntityView>;
+  connections: Record<string, ConnectionView>;
+  selectedConnection: string | null;
+  /** Impact overlay shown on the map (real analysis or a simulation). */
+  impact: ImpactReport | null;
   blocks: BlockView[];
   adapters: AdapterStatus[];
   hints: HostnameHint[];
@@ -47,6 +51,8 @@ interface State {
   setDaylight: (d: Daylight) => void;
   setEditLayout: (b: boolean) => void;
   setMe: (me: Me) => void;
+  selectConnection: (id: string | null) => void;
+  setImpact: (r: ImpactReport | null) => void;
   setPersonal: (p: { prefs?: UserPrefs; favorites?: string[]; savedViews?: SavedView[] }) => void;
   setWs: (s: State['ws']) => void;
 }
@@ -63,6 +69,9 @@ export const useStore = create<State>((set) => ({
   connected: false,
   actionsEnabled: false,
   entities: {},
+  connections: {},
+  selectedConnection: null,
+  impact: null,
   blocks: [],
   adapters: [],
   hints: [],
@@ -84,6 +93,7 @@ export const useStore = create<State>((set) => ({
         return {
           loaded: true, mode: m.data.mode, connected: m.data.connected, actionsEnabled: m.data.actionsEnabled,
           entities: Object.fromEntries(m.data.entities.map((e) => [e.id, e])), blocks: m.data.blocks,
+          connections: Object.fromEntries((m.data.connections ?? []).map((c) => [c.id, c])),
           adapters: m.data.adapters, hints: m.data.hints, events: m.data.recentEvents,
           serverOffsetMs: Date.parse(m.data.serverTime) - Date.now(),
         };
@@ -106,16 +116,24 @@ export const useStore = create<State>((set) => ({
         return { adapters: m.data, connected: s.connected || m.data.some((a) => a.lastCompleteAt && a.adapter !== 'config') };
       case 'hints':
         return { hints: m.data };
+      case 'connection': {
+        const connections = { ...s.connections };
+        if (m.data.lifecycle === 'archived') delete connections[m.data.id];
+        else connections[m.data.id] = m.data;
+        return { connections };
+      }
       default:
         return {};
     }
   }),
-  select: (id, focus = false) => set((s) => ({ selectedId: id, focusTick: focus ? s.focusTick + 1 : s.focusTick })),
+  select: (id, focus = false) => set((s) => ({ selectedId: id, focusTick: focus ? s.focusTick + 1 : s.focusTick, ...(id ? { selectedConnection: null } : {}), ...(id !== s.selectedId ? { impact: null } : {}) })),
   setView: (view) => set({ view }),
   setFilters: (f) => set((s) => ({ filters: { ...s.filters, ...f } })),
   setDaylight: (daylight) => { savePref('daylight', daylight); set({ daylight }); },
   setEditLayout: (editLayout) => set({ editLayout }),
   setMe: (me) => set({ me }),
+  selectConnection: (selectedConnection) => set({ selectedConnection, ...(selectedConnection ? { selectedId: null } : {}) }),
+  setImpact: (impact) => set({ impact }),
   setPersonal: (p) => set((s) => ({
     prefs: p.prefs ?? s.prefs, favorites: p.favorites ?? s.favorites, savedViews: p.savedViews ?? s.savedViews,
     daylight: p.prefs?.daylight ?? s.daylight,

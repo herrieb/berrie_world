@@ -4,6 +4,8 @@ const SEV_COLOR = { info: '#5b8def', notice: '#3fd17a', warning: '#f2b33d', crit
 
 export function eventColor(ev: WorldEvent): string {
   if (ev.type === 'service.unhealthy' || ev.type === 'service.unreachable' || ev.type === 'host.offline') return '#ef4b4b';
+  if (ev.type === 'connection.degraded') return '#ef4b4b';
+  if (ev.type === 'connection.recovered') return '#3fd17a';
   if (ev.type === 'service.recovered' || ev.type === 'service.healthy' || ev.type === 'host.online' || ev.type === 'container.started') return '#3fd17a';
   if (ev.type === 'service.removal_confirmed' || ev.type === 'service.archived') return '#8a94a6';
   return SEV_COLOR[ev.severity];
@@ -41,7 +43,12 @@ export function describeEvent(ev: WorldEvent, entities: Record<string, EntityVie
     case 'ai.request_completed': return `AI request completed by ${rel || name}`;
     case 'task.executed': return `${name} executed a task`;
     case 'alert': return `Alert on ${name}${d.message ? `: ${d.message}` : ''}`;
-    case 'action.performed': return `Admin ${d.action} on ${name}`;
+    case 'action.performed': return `${d.by ?? 'An operator'} ran ${d.action} on ${name}`;
+    case 'connection.discovered': return `New ${d.verification} ${String(d.type)} link: ${name} → ${rel}`;
+    case 'connection.missing': return `${String(d.type)} link ${name} → ${rel} not reported — awaiting confirmation`;
+    case 'connection.removed': return `${String(d.type)} link ${name} → ${rel} removal confirmed`;
+    case 'connection.degraded': return `${String(d.type)} link ${name} → ${rel} is ${d.to}${d.reason ? ` — ${d.reason}` : ''}`;
+    case 'connection.recovered': return `${String(d.type)} link ${name} → ${rel} recovered`;
     case 'layout.moved': return `${name} moved`;
     default: return `${ev.type} ${name}`;
   }
