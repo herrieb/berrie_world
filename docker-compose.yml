@@ -1,0 +1,70 @@
+# Berrie World — isometric infrastructure village.
+# Binds to 127.0.0.1 only. Expose publicly only behind Cloudflare Access (see README).
+name: berrie-world
+
+services:
+  berrie-world:
+    build: .
+    image: berrie-world:local
+    container_name: berrie-world
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DOCKER_PROXY_URL: http://docker-proxy:2375
+    ports:
+      - "127.0.0.1:${BERRIE_PORT:-4780}:4780"
+    volumes:
+      - ./data:/data
+      - ./config:/config:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [berrie, berrie-docker]
+    depends_on: [docker-proxy]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    labels:
+      berrie.world.protect: "true"
+      berrie.world.type: house
+
+  # Narrowly scoped, read-only Docker API. The browser never talks to this; only the backend does.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: berrie-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      PING: 1
+      VERSION: 1
+      # Write access stays off until operations are deliberately enabled (ENABLE_ACTIONS=true in .env):
+      POST: ${PROXY_ALLOW_POST:-0}
+      ALLOW_START: ${PROXY_ALLOW_POST:-0}
+      ALLOW_STOP: ${PROXY_ALLOW_POST:-0}
+      ALLOW_RESTARTS: ${PROXY_ALLOW_POST:-0}
+      # explicitly denied
+      EXEC: 0
+      IMAGES: 0
+      NETWORKS: 0
+      VOLUMES: 0
+      SECRETS: 0
+      CONFIGS: 0
+      BUILD: 0
+      AUTH: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [berrie-docker]
+    read_only: true
+    tmpfs: [/tmp, /run]
+    mem_limit: 64m
+    labels:
+      berrie.world.protect: "true"
+      berrie.world.type: tower
+
+networks:
+  berrie: {}
+  berrie-docker:
+    internal: true # no route out; only reachable from berrie-world

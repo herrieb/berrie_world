@@ -1,0 +1,36 @@
+{
+  "$comment": "Copy to berrie.config.json. All sections optional. Never put secrets in this file.",
+  "discoveryIntervalSeconds": 30,
+  "hosts": [
+    {
+      "id": "srv01",
+      "name": "srv01",
+      "docker": { "url": "http://docker-proxy:2375" },
+      "probe": { "type": "tcp", "host": "srv01", "port": 22, "intervalSeconds": 60, "failureThreshold": 3 }
+    }
+  ],
+  "services": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "type": "lab",
+      "host": "srv01",
+      "check": { "type": "http", "url": "http://host.docker.internal:11434/api/version", "intervalSeconds": 60, "timeoutMs": 4000, "failureThreshold": 3 }
+    }
+  ],
+  "endpoints": [
+    { "hostname": "n8n.berrie.uk", "service": "compose:n8n/n8n" },
+    { "hostname": "dashboard.berrie.uk", "service": "container:dashboard", "check": { "type": "http", "url": "https://dashboard.berrie.uk/", "intervalSeconds": 180, "expectStatus": ["200-399", "401", "403"] } }
+  ],
+  "tunnelConfigPaths": ["/etc/cloudflared/config.yml"],
+  "hints": [
+    "ai.berrie.uk", "ai_chat.berrie.uk", "c64.berrie.uk", "dashboard.berrie.uk", "dockerized.berrie.uk",
+    "emlakci.berrie.uk", "filesharez.berrie.uk", "lights.berrie.uk", "n8n.berrie.uk", "openlamma.berrie.uk",
+    "paperclip.berrie.uk", "pesten.berrie.uk", "proxy2.berrie.uk", "red-alert2.berrie.uk", "roadweather.berrie.uk",
+    "share.berrie.uk", "slot.berrie.uk", "stats.berrie.uk", "term.berrie.uk", "ssh.berrie.uk"
+  ],
+  "protected": ["container:cloudflared"],
+  "canary": { "host": "1.1.1.1", "port": 443 },
+  "removal": { "confirmations": 3, "minMissingSeconds": 120, "archiveAfterHours": 24 },
+  "retention": { "checkResultDays": 7, "eventDays": 90, "auditDays": 365, "archivedEntityDays": null }
+}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+data/
+*.sqlite*
+.env
+config/berrie.config.json
+docker-compose.override.yml
