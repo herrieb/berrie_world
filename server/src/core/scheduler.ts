@@ -132,7 +132,7 @@ export class Scheduler {
         this.safe('harbor', () => this.world.reconcile(this.hosts.hostInventory()));
         let checks: { entityId: string; check: CheckConfig }[] = [];
         try {
-          const plan = await endpointInventory(this.cfg, this.world.repo);
+          const plan = await endpointInventory(this.cfg, this.world.repo, this.hosts.tunnelRoutes);
           this.world.reconcile(plan.inventory);
           checks = plan.checks;
         } catch (err) {

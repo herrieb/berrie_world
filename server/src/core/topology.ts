@@ -15,9 +15,40 @@ export function globMatch(glob: string, hostname: string): boolean {
   return re.test(hostname.toLowerCase());
 }
 
-/** The gateway a public hostname passes through, if any configured route matches it. */
+/**
+ * Tunnels found running on hosts (collector saw cloudflared and/or its live route list). Kept after reports stop:
+ * a silent collector does not prove the tunnel is gone. Config gateways for the same host take precedence.
+ */
+const discoveredByApp = new WeakMap<AppConfig, Map<string, GatewayConfig & { reportedRoutes: string[] }>>();
+const discoveredFor = (cfg: AppConfig) => { let m = discoveredByApp.get(cfg); if (!m) { m = new Map(); discoveredByApp.set(cfg, m); } return m; };
+
+/** Configured gateways (with routes reported by their host merged in) plus discovered ones. */
+export function allGateways(cfg: AppConfig): (GatewayConfig & { reportedRoutes?: string[] })[] {
+  const discovered = discoveredFor(cfg);
+  const out: (GatewayConfig & { reportedRoutes?: string[] })[] = cfg.gateways.map((g) => {
+    const d = discovered.get(g.host);
+    return d && g.kind === 'cloudflare-tunnel' ? { ...g, routes: [...new Set([...(g.routes ?? []), ...d.reportedRoutes])], reportedRoutes: d.reportedRoutes } : g;
+  });
+  for (const d of discovered.values()) if (!cfg.gateways.some((g) => g.host === d.host && g.kind === 'cloudflare-tunnel')) out.push(d);
+  return out;
+}
+
+/** The gateway a public hostname passes through, if any configured or reported route matches it. */
 export function gatewayFor(cfg: AppConfig, hostname: string): GatewayConfig | undefined {
-  return cfg.gateways.find((g) => (g.routes ?? []).some((r) => globMatch(r, hostname)));
+  const gws = allGateways(cfg);
+  return gws.find((g) => (g as { reportedRoutes?: string[] }).reportedRoutes?.includes(hostname.toLowerCase())) ?? gws.find((g) => (g.routes ?? []).some((r) => globMatch(r, hostname)));
+}
+
+function refreshDiscovered(cfg: AppConfig, hm: HostManager): void {
+  const discovered = discoveredFor(cfg);
+  for (const h of hm.resolve()) {
+    const x = hm.extras.get(h.id);
+    const routes = hm.tunnelRoutes.get(h.id);
+    const fresh = x && Date.now() - Date.parse(x.ts) <= SIGNAL_FRESH_MS;
+    if ((fresh && x!.cloudflared === 'active') || routes) {
+      discovered.set(h.id, { id: 'cloudflared', name: 'Cloudflare Tunnel', host: h.id, kind: 'cloudflare-tunnel', routes: routes?.rules.map((r) => r.hostname) ?? [], reportedRoutes: routes?.rules.map((r) => r.hostname) ?? [] });
+    }
+  }
 }
 
 const SIGNAL_FRESH_MS = 5 * 60_000;
@@ -50,9 +81,11 @@ export function buildTopology(cfg: AppConfig, repo: Repo, hm: HostManager): Topo
   const byId = new Map(all.map((e) => [e.id, e]));
   const entities: ObservedEntity[] = [];
   const checks: TopologyPlan['checks'] = [];
+  refreshDiscovered(cfg, hm);
+  const gateways = allGateways(cfg);
 
   // ---- gateways and external services (entities) ----
-  const needEdge = cfg.gateways.some((g) => g.kind === 'cloudflare-tunnel');
+  const needEdge = gateways.some((g) => g.kind === 'cloudflare-tunnel');
   if (needEdge) {
     entities.push({ id: CLOUDFLARE_EDGE, kind: 'external', name: 'Cloudflare edge', buildingType: 'port', parentId: null, hostId: null, meta: { provider: 'cloudflare', description: 'Public internet entry point for tunnelled hostnames' } });
   }
@@ -60,13 +93,15 @@ export function buildTopology(cfg: AppConfig, repo: Repo, hm: HostManager): Topo
     entities.push({ id: externalEntityId(x.id), kind: 'external', name: x.name, buildingType: 'port', parentId: null, hostId: null, hostnames: x.hostnames ?? [], meta: { configured: true } });
     if (x.check) checks.push({ entityId: externalEntityId(x.id), check: x.check });
   }
-  for (const g of cfg.gateways) {
+  for (const g of gateways) {
     if (g.entity) continue; // the gateway is an existing container entity
     const hostId = hostEntityId(g.host);
+    if (!byId.has(hostId)) continue;
     const sig = gatewaySignal(g, hm);
+    const isConfigured = cfg.gateways.some((c) => c.host === g.host && c.id === g.id);
     entities.push({
       id: gatewayEntityId(g), kind: 'gateway', name: g.name, buildingType: 'gateway', parentId: hostId, hostId,
-      meta: { gatewayKind: g.kind, routes: g.routes ?? [], configured: true },
+      meta: { gatewayKind: g.kind, routes: g.routes ?? [], configured: isConfigured, discoveredOn: isConfigured ? null : g.host },
       ...(sig && !g.check ? { health: sig } : {}),
     });
     if (g.check) checks.push({ entityId: gatewayEntityId(g), check: g.check });
@@ -93,15 +128,16 @@ export function buildTopology(cfg: AppConfig, repo: Repo, hm: HostManager): Topo
 
   // ---- gateway routes: internet → edge → gateway → service ----
   const routes: ObservedConnection[] = [];
-  for (const g of cfg.gateways) {
+  for (const g of gateways) {
     const gid = gatewayEntityId(g);
+    const reported = new Set((g as { reportedRoutes?: string[] }).reportedRoutes ?? []);
     if (!byId.has(gid) && !entities.some((x) => x.id === gid)) continue;
     const sig = gatewaySignal(g, hm);
     const gHealth = health(gid) ?? sig?.health ?? 'unknown';
     const endpoints = all.filter((e) => e.kind === 'endpoint' && e.lifecycle !== 'removed' && e.hostnames.some((h) => (g.routes ?? []).some((r) => globMatch(r, h))));
     if (g.kind === 'cloudflare-tunnel') {
       routes.push(conn('internet', CLOUDFLARE_EDGE, gid, sig?.health === 'healthy' ? 'verified' : 'configured',
-        [`gateway ${g.name} is a Cloudflare Tunnel (config)`, ...(sig ? [sig.reason] : ['tunnel state not reported by a collector'])],
+        [cfg.gateways.includes(g) || cfg.gateways.some((c) => c.host === g.host) ? `gateway ${g.name} is a Cloudflare Tunnel (config)` : `cloudflared found running on ${g.host} by its collector`, ...(sig ? [sig.reason] : ['tunnel state not reported by a collector'])],
         { health: { health: gHealth === 'healthy' ? 'healthy' : gHealth === 'unhealthy' || gHealth === 'unreachable' ? 'unreachable' : 'unknown', reason: sig?.reason ?? 'tunnel state not measured' },
           meta: { hostnames: endpoints.flatMap((e) => e.hostnames).slice(0, 50), label: 'Cloudflare Tunnel' } }));
     }
@@ -115,7 +151,8 @@ export function buildTopology(cfg: AppConfig, repo: Repo, hm: HostManager): Topo
     for (const [target, hostnames] of byTarget) {
       const t = health(target);
       const hop: Health = gHealth === 'unhealthy' || gHealth === 'unreachable' ? 'unreachable' : t === 'unhealthy' || t === 'unreachable' ? 'unhealthy' : gHealth === 'healthy' && t === 'healthy' ? 'healthy' : 'unknown';
-      routes.push(conn('proxy', gid, target, 'configured', hostnames.map((h) => `route ${h} → ${byId.get(target)!.name} (${String(all.find((e) => e.hostnames.includes(h))?.meta.via ?? 'config')})`),
+      const verifiedRoute = hostnames.every((h) => reported.has(h));
+      routes.push(conn('proxy', gid, target, verifiedRoute ? 'verified' : 'configured', hostnames.map((h) => `route ${h} → ${byId.get(target)!.name} (${reported.has(h) ? `live route list from cloudflared on ${g.host}` : String(all.find((e) => e.hostnames.includes(h))?.meta.via ?? 'config')})`),
         { health: { health: hop, reason: hop === 'unreachable' ? `gateway ${g.name} is down` : hop === 'unhealthy' ? 'target service is failing' : hop === 'healthy' ? 'gateway and target healthy' : 'not fully known' }, meta: { hostnames } }));
     }
   }

@@ -284,11 +284,18 @@ export class HostManager {
     this.repo.hosts.setFacts(h.id, mergeFacts(stored, parsed.facts, this.providedCategories(h), Date.now(), h.intervalSeconds * 3000));
     this.repo.hosts.insertMetrics(h.entityId, source, ts, parsed.metrics);
     this.extras.set(h.id, { ...parsed.extras, ts });
-    this.world.patchMeta(h.entityId, { facts: this.facts(h.id), signals: { cloudflared: parsed.extras.cloudflared, signalsAt: ts } });
+    if (parsed.extras.tunnelIngress) this.tunnelRoutes.set(h.id, { rules: parsed.extras.tunnelIngress, ts });
+    this.world.patchMeta(h.entityId, { facts: this.facts(h.id), signals: { cloudflared: parsed.extras.cloudflared, tunnelRoutes: parsed.extras.tunnelIngress?.length ?? null, signalsAt: ts } });
   }
 
   /** Raw topology signals from the last collection (cloudflared, tailscale), keyed by host id. */
-  readonly extras = new Map<string, { cloudflared: string; tailscale: unknown; ts: string }>();
+  readonly extras = new Map<string, { cloudflared: string; tailscale: unknown; ts: string; tunnelIngress?: { hostname: string; service: string }[] | null }>();
+
+  /**
+   * Last tunnel route list reported per host. Kept when reports stop (a silent collector is not evidence that the
+   * hostnames are gone); `ts` tells consumers whether it is fresh.
+   */
+  readonly tunnelRoutes = new Map<string, { rules: { hostname: string; service: string }[]; ts: string }>();
 
   private checkAgentOverdue(h: ResolvedHost, rt: { agentOverdueReported: boolean }): void {
     const last = h.row?.lastContactAt ? Date.parse(h.row.lastContactAt) : null;

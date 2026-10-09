@@ -81,11 +81,20 @@ export interface EndpointPlan {
  * Endpoints (public hostnames) from config, container labels and cloudflared ingress files.
  * Each endpoint becomes a child of the service it routes to, or a standalone building if none is known.
  */
-export async function endpointInventory(cfg: AppConfig, repo: Repo): Promise<EndpointPlan> {
+export async function endpointInventory(cfg: AppConfig, repo: Repo, reported: Map<string, { rules: { hostname: string; service: string }[]; ts: string }> = new Map()): Promise<EndpointPlan> {
   const services = repo.listEntities().filter((e) => e.kind === 'service' && e.lifecycle !== 'removed');
   const found = new Map<string, { hostname: string; target?: EntityRow; via: string; check?: CheckConfig | false; host?: string }>();
 
+  // Routes reported by a host's collector (cloudflared /config): hostnames live on that host's island.
+  let stale = false;
+  for (const [hostId, rep] of reported) {
+    if (Date.now() - Date.parse(rep.ts) > 10 * 60_000) stale = true; // keep the last known routes, but never treat absence as removal
+    const local = services.filter((x) => x.hostId === hostEntityId(hostId));
+    for (const r of rep.rules) found.set(r.hostname, { hostname: r.hostname, target: matchIngress(r.service, local), via: `cloudflared on ${hostId}`, host: hostId });
+  }
+
   const { rules, errors } = await readTunnelIngress(cfg.tunnelConfigPaths);
+  if (stale) errors.push('a host tunnel report is stale');
   for (const r of rules) {
     if (r.hostname.includes('*')) continue;
     found.set(r.hostname, { hostname: r.hostname, target: matchIngress(r.service, services), via: 'tunnel ingress' });

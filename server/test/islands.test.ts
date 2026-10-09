@@ -36,7 +36,7 @@ class FakeDocker {
   async stop() { this.server.closeAllConnections(); await new Promise((r) => this.server.close(r)); }
 }
 
-const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean } = {}) => [
+const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean; tunnel?: boolean } = {}) => [
   '', '@@hostname', 'srv-a', '@@os', 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"', 'NAME="Debian GNU/Linux"', 'VERSION_ID="12"',
   '@@uname', 'Linux 6.1.0-18-amd64 x86_64', '@@uptime', '86400.5 300000.1', '@@loadavg', '0.42 0.30 0.25 1/300 12345',
   '@@meminfo', ...(opts.meminfo === false ? ['cat: /proc/meminfo: Permission denied'] : ['MemTotal:        8000000 kB', 'MemFree:         1000000 kB', 'MemAvailable:    6000000 kB', 'SwapTotal:       1000000 kB', 'SwapFree:         900000 kB']),
@@ -44,17 +44,20 @@ const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean } = {}) => [
   '@@net1', 'Inter-|   Receive', ' face |bytes', '  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0',
   '@@stat2', 'cpu  150 0 150 900 0 0 0 0 0 0', '@@net2', 'Inter-|   Receive', ' face |bytes', '  eth0: 6000 10 0 0 0 0 0 0 4000 20 0 0 0 0 0 0',
   '@@df', 'Filesystem Type 1-blocks Used Available Capacity Mounted on', '/dev/sda1 ext4 100000000000 42000000000 58000000000 42% /',
-  '@@docker', 'permission denied while trying to connect to the Docker daemon socket', '@@cloudflared', 'inactive', '@@tailscale', '__NA__', '@@end', '',
+  '@@docker', 'permission denied while trying to connect to the Docker daemon socket', '@@cloudflared', opts.tunnel ? 'active' : 'inactive',
+  '@@cftunnel', ...(opts.tunnel ? [JSON.stringify({ version: 3, config: { ingress: [{ hostname: 'tv.example.com', service: 'http://localhost:8080' }, { hostname: 'cam.example.com', service: 'http://localhost:9000' }, { service: 'http_status:404' }] } })] : []),
+  '@@tailscale', '__NA__', '@@end', '',
 ].join('\n');
 
 class FakeSsh implements Transport {
   static fail: null | 'network' | 'auth' = null;
   static meminfo = true;
+  static tunnel = false;
   constructor(private readonly dockerPort: () => number) {}
   async exec() {
     if (FakeSsh.fail === 'network') throw Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:22'), { code: 'ECONNREFUSED' });
     if (FakeSsh.fail === 'auth') throw new Error('All configured authentication methods failed');
-    return { code: 0, stdout: COLLECTOR_OUTPUT({ meminfo: FakeSsh.meminfo }), stderr: '' };
+    return { code: 0, stdout: COLLECTOR_OUTPUT({ meminfo: FakeSsh.meminfo, tunnel: FakeSsh.tunnel }), stderr: '' };
   }
   async forwardSocket() {
     if (FakeSsh.fail) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
@@ -102,7 +105,7 @@ beforeEach(async () => {
   await docker.start(); await docker2.start();
   docker.containers = [container('web'), container('db')];
   docker2.containers = [container('api', 'billing')];
-  FakeSsh.fail = null; FakeSsh.meminfo = true;
+  FakeSsh.fail = null; FakeSsh.meminfo = true; FakeSsh.tunnel = false;
   const cfg = { ...loadConfig({ DATA_DIR: dir, CONFIG_PATH: join(dir, 'none.json'), BERRIE_MASTER_KEY: 'a'.repeat(64) }), hosts: [] };
   app = await buildApp(cfg, { startScheduler: false, logger: false, transportFactory: () => new FakeSsh(() => docker.port) });
   admin = await signIn(app, 'admin');
@@ -286,6 +289,30 @@ describe('server islands and Server Harbor', () => {
     const other = await signIn(app, 'admin');
     const k2 = (await req('POST', '/api/harbor/keypair')).json() as { keyId: string };
     expect((await req('POST', '/api/harbor/hosts', { id: 'gen3', name: 'Gen3', method: 'ssh', settings: { address: '10.0.0.9', username: 'berrie' }, credential: { kind: 'generated', keyId: k2.keyId }, hostKey: HOST_KEY, hostKeyConfirmed: true }, other)).statusCode).toBe(400);
+  });
+
+  it('a tunnel running on a registered server is discovered with its public hostnames, on that island', async () => {
+    FakeSsh.tunnel = true;
+    await registerSsh('pi', 'none');
+    await cycle();
+    await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!);
+    await cycle();
+    const snap = await snapshot();
+    const gw = snap.entities.find((e) => e.id === 'gateway:pi:cloudflared')!;
+    expect(gw.hostId).toBe('host:pi');
+    expect(gw.health).toBe('healthy');
+    const tv = snap.entities.find((e) => e.id === 'endpoint:tv.example.com')!;
+    expect(tv.hostId).toBe('host:pi');
+    expect(tv.meta.via).toBe('cloudflared on pi');
+    expect(snap.connections.find((c) => c.type === 'internet' && c.dst === 'gateway:pi:cloudflared')!.verification).toBe('verified');
+    const route = (await req('GET', `/api/entities/${encodeURIComponent('endpoint:tv.example.com')}/route`)).json() as { routes: { entityId: string }[][] };
+    expect(route.routes[0].map((h) => h.entityId)).toEqual(['endpoint:tv.example.com', 'external:cloudflare-edge', 'gateway:pi:cloudflared']);
+    // The collector goes silent: the hostnames and the gateway stay (stale is not removed).
+    FakeSsh.fail = 'network';
+    for (let i = 0; i < 5; i++) { await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!); await cycle(); }
+    const later = await snapshot();
+    expect(later.entities.find((e) => e.id === 'endpoint:tv.example.com')!.lifecycle).not.toMatch(/missing|removed/);
+    expect(later.entities.find((e) => e.id === 'gateway:pi:cloudflared')).toBeDefined();
   });
 
   it('the push agent reports with its own token; containers it reports become services', async () => {

@@ -23,6 +23,7 @@ s net2; cat /proc/net/dev 2>/dev/null
 s df; df -P -T -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs -x fuse.snapfuse 2>&1
 s docker; if command -v docker >/dev/null 2>&1; then docker info --format '{{.ContainersRunning}} {{.ContainersStopped}} {{.Containers}}' 2>&1 | head -3; else echo "__NA__ docker CLI not installed"; fi
 s cloudflared; systemctl is-active cloudflared 2>/dev/null; pgrep -x cloudflared >/dev/null 2>&1 && echo process-running
+s cftunnel; for p in 20241 20242 20243 20244 20245; do r=$( (curl -s -m 2 "http://127.0.0.1:$p/config" || wget -qO- -T 2 "http://127.0.0.1:$p/config") 2>/dev/null ); case "$r" in *ingress*) printf '%s\n' "$r" | head -c 300000; break;; esac; done
 s tailscale; if command -v tailscale >/dev/null 2>&1; then tailscale status --json 2>/dev/null | head -c 400000; else echo "__NA__"; fi
 s end
 `;
@@ -31,7 +32,7 @@ export interface CollectResult {
   facts: Partial<HostFacts>;
   metrics: { metric: string; value: number }[];
   /** Raw signals used by the topology layer (gateways, VPN peers). */
-  extras: { cloudflared: 'active' | 'inactive' | 'unknown'; tailscale: unknown | null };
+  extras: { cloudflared: 'active' | 'inactive' | 'unknown'; tailscale: unknown | null; tunnelIngress: { hostname: string; service: string }[] | null };
 }
 
 function sections(out: string): Map<string, string> {
@@ -139,13 +140,23 @@ export function parseCollector(out: string, source: string, ts: string): Collect
     ? confirmed({ running: Number(dm[1]), stopped: Number(dm[2]), total: Number(dm[3]) }, ts, source)
     : unavailable(ts, source, dk.startsWith('__NA__') ? 'docker CLI not installed' : /permission denied/i.test(dk) ? 'no permission to query Docker (user not in docker group)' : (dk.split('\n')[0] || 'docker info failed').slice(0, 160));
 
+  // Live route list from cloudflared's local metrics server (/config): works for dashboard-managed tunnels, no root needed.
+  let tunnelIngress: { hostname: string; service: string }[] | null = null;
+  const tc = (s.get('cftunnel') ?? '').trim();
+  if (tc) {
+    try {
+      const doc = JSON.parse(tc) as { config?: { ingress?: { hostname?: string | null; service?: string }[] } };
+      tunnelIngress = (doc.config?.ingress ?? []).filter((r) => r.hostname && r.service && !r.hostname.includes('*'))
+        .map((r) => ({ hostname: String(r.hostname).toLowerCase().slice(0, 253), service: String(r.service).slice(0, 300) })).slice(0, 500);
+    } catch { tunnelIngress = null; }
+  }
   const cf = s.get('cloudflared') ?? '';
-  const cloudflared = /^active$/m.test(cf) || /process-running/.test(cf) ? 'active' : /inactive|failed|unknown/.test(cf) ? 'inactive' : 'unknown';
+  const cloudflared = /^active$/m.test(cf) || /process-running/.test(cf) || tunnelIngress ? 'active' : /inactive|failed|unknown/.test(cf) ? 'inactive' : 'unknown';
   let tailscale: unknown = null;
   const ts2 = (s.get('tailscale') ?? '').trim();
   if (ts2 && !ts2.startsWith('__NA__')) { try { tailscale = JSON.parse(ts2); } catch { tailscale = null; } }
 
-  return { facts, metrics, extras: { cloudflared, tailscale } };
+  return { facts, metrics, extras: { cloudflared, tailscale, tunnelIngress } };
 }
 
 /** Facts for a host with no collector at all: everything is honestly 'unconfigured'. */
