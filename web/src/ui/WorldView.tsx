@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Alert, BuildingType, Summary } from '@berrie/shared';
+import type { Alert, Biome, BuildingType, Summary } from '@berrie/shared';
 import { useStore, matchesFilters, filtersActive, useRole } from '../state/store';
 import { onServerMessage, api, savePrefs } from '../state/api';
 import { WorldRenderer } from '../world/WorldRenderer';
@@ -19,6 +19,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const s = useStore();
   const canOperate = useRole('operator');
   const [saving, setSaving] = useState<string | null>(null);
+  const [arrange, setArrange] = useState(false);
   const list = useMemo(() => Object.values(s.entities), [s.entities]);
 
   useEffect(() => {
@@ -31,6 +32,10 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       onCamera: () => setCamTick((t) => t + 1),
       // Camera position is personal; persisted (debounced) so it follows the user across devices.
       onCameraSettled: (camera) => savePrefs({ camera }),
+      onIslandMoved: (district, offset) => {
+        const cur = useStore.getState().prefs.islandOffsets ?? {};
+        savePrefs({ islandOffsets: { ...cur, [district]: offset } });
+      },
     });
     rendererRef.current = r;
     let cancelled = false;
@@ -41,10 +46,16 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
 
   const matching = useMemo(() => (filtersActive(s.filters) ? new Set(list.filter((e) => matchesFilters(e, s.filters)).map((e) => e.id)) : null), [list, s.filters]);
 
+  const biomes = useMemo(() => Object.fromEntries(list.filter((e) => e.kind === 'host' && (e.meta.appearance as { biome?: string } | undefined)?.biome).map((e) => [e.id, (e.meta.appearance as { biome: Biome }).biome])), [list]);
+
   useEffect(() => {
     if (!ready) return;
-    rendererRef.current?.update({ entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout, labelDensity: s.prefs.labelDensity ?? 'auto', initialCamera: s.prefs.camera ?? null });
-  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera]);
+    rendererRef.current?.update({
+      entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout,
+      labelDensity: s.prefs.labelDensity ?? 'auto', initialCamera: s.prefs.camera ?? null,
+      offsets: s.prefs.islandOffsets ?? {}, biomes, arrangeIslands: arrange,
+    });
+  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera, s.prefs.islandOffsets, biomes, arrange]);
 
   useEffect(() => { if (ready && s.selectedId && s.focusTick) rendererRef.current?.focus(s.selectedId); }, [s.focusTick, ready]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
@@ -120,9 +131,16 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         <button onClick={() => rendererRef.current?.zoomBy(1.25)} title="Zoom in (+)"><Icon name="plus" /></button>
         <button onClick={() => rendererRef.current?.zoomBy(0.8)} title="Zoom out (−)"><Icon name="minus" /></button>
         <button onClick={() => rendererRef.current?.fit()} title="Fit village"><Icon name="target" /></button>
+        {hosts.length > 1 && <button className={arrange ? 'on' : ''} onClick={() => { setArrange(!arrange); if (s.editLayout) s.setEditLayout(false); }} title="Arrange islands (personal — only changes your own map)"><Icon name="anchor" /></button>}
         {canOperate && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
       </div>
       {ready && <Minimap renderer={rendererRef.current!} tick={camTick} entitiesKey={list.length + s.blocks.length} />}
+      {arrange && (
+        <div className="edit-banner">Arrange islands: drag an island to move it. This is your personal map — nobody else's view changes.
+          {Object.keys(s.prefs.islandOffsets ?? {}).length > 0 && <button onClick={() => savePrefs({ islandOffsets: {} })}>Reset</button>}
+          <button onClick={() => setArrange(false)}>Done</button>
+        </div>
+      )}
       {s.editLayout && <div className="edit-banner">Layout editor: drag a building to a free spot. Positions are saved and pinned.<button onClick={() => s.setEditLayout(false)}>Done</button></div>}
       {toast && <div className="toast">{toast}</div>}
 

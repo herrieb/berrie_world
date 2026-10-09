@@ -1,4 +1,4 @@
-import type { BlockView } from '@berrie/shared';
+import type { Biome, BlockView } from '@berrie/shared';
 import { Px, hex, shade, mix, hash2, noise, type RGB, TW, TH } from './pixel';
 
 export interface Rect { x: number; y: number; w: number; h: number }
@@ -16,7 +16,19 @@ export interface Terrain {
   lighthouse: { x: number; y: number } | null;
   boats: { x: number; y: number }[];
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  biome: Biome;
 }
+
+interface Palette { grass: number; forest: number; lawn: number; sand: number; cliffTop: number; treeDensity: number }
+/** Ground palettes per island biome (a purely visual, per-server choice in Server Harbor). */
+export const PALETTES: Record<Biome, Palette> = {
+  meadow: { grass: 0x5aa548, forest: 0x3f8a3c, lawn: 0x68b452, sand: 0xe4d096, cliffTop: 0x3e7d34, treeDensity: 1 },
+  autumn: { grass: 0x8f9b44, forest: 0x8a6a34, lawn: 0x9db051, sand: 0xe4d096, cliffTop: 0x6c7832, treeDensity: 1 },
+  snow: { grass: 0xdbe6ee, forest: 0xb4c6d4, lawn: 0xecf3f7, sand: 0xd2dbe2, cliffTop: 0xc4d2dc, treeDensity: 0.7 },
+  desert: { grass: 0xd6b56a, forest: 0xc29a56, lawn: 0xe0c47e, sand: 0xecd9a0, cliffTop: 0xb58e4c, treeDensity: 0.2 },
+  tropical: { grass: 0x4dbd4b, forest: 0x2f9848, lawn: 0x63cf5b, sand: 0xf3e3aa, cliffTop: 0x399a3a, treeDensity: 1.15 },
+};
+export const TREE_TINT: Record<Biome, number> = { meadow: 0xffffff, autumn: 0xffb46a, snow: 0xe6f0fa, desert: 0xd8cc98, tropical: 0xd8ffd0 };
 
 const key = (x: number, y: number) => `${x},${y}`;
 const CLIFF = 12;
@@ -28,7 +40,8 @@ function distToRect(x: number, y: number, r: Rect): number {
   return Math.hypot(dx, dy);
 }
 
-export function buildTerrain(blocks: BlockView[], buildings: Rect[]): Terrain {
+export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biome = 'meadow'): Terrain {
+  const pal = PALETTES[biome] ?? PALETTES.meadow;
   const cores: Rect[] = blocks.map((b) => ({ x: b.x, y: b.y, w: b.size + 1, h: b.size + 1 }));
   for (const r of buildings) cores.push(r);
   if (!cores.length) cores.push({ x: 0, y: 0, w: 8, h: 8 });
@@ -129,7 +142,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[]): Terrain {
 
   // land tiles, back to front, then cliffs
   const order = [...land].map((k) => k.split(',').map(Number) as [number, number]).sort((a, b) => a[0] + a[1] - (b[0] + b[1]));
-  const GRASS = hex(0x5aa548), FOREST = hex(0x3f8a3c), LAWN = hex(0x68b452), SAND = hex(0xe4d096), ASPHALT = hex(0x5a5f6a), CURB = hex(0xbcb6a8);
+  const GRASS = hex(pal.grass), FOREST = hex(pal.forest), LAWN = hex(pal.lawn), SAND = hex(pal.sand), ASPHALT = hex(0x5a5f6a), CURB = hex(0xbcb6a8);
   const rd = (x: number, y: number) => roads.has(key(x, y));
   for (const [x, y] of order) {
     const k = key(x, y);
@@ -176,7 +189,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[]): Terrain {
         for (let z = 0; z < ch; z++) {
           let c: RGB;
           if (isBeach) c = shade(SAND, 0.75);
-          else if (z < 2) c = shade(hex(0x3e7d34), f);
+          else if (z < 2) c = shade(hex(pal.cliffTop), f);
           else {
             const layer = Math.floor((z + noise(sx * 0.2, z * 0.3, 4) * 3) / 3) % 3;
             c = shade([hex(0x8a6a4a), hex(0x766050), hex(0x9a8268)][layer], f * (0.9 + hash2(sx, z, 6) * 0.15));
@@ -204,7 +217,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[]): Terrain {
     }
     const nearRoad = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => roads.has(key(x + dx, y + dy)));
     const dens = noise(x * 0.22, y * 0.22, 41);
-    if (h < dens * (nearRoad ? 0.4 : 0.95)) {
+    if (h < dens * (nearRoad ? 0.4 : 0.95) * pal.treeDensity) {
       const n = 1 + (dens > 0.55 && !nearRoad ? 1 : 0);
       for (let i = 0; i < n; i++) {
         const r = hash2(x, y, 50 + i);
@@ -232,7 +245,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[]): Terrain {
     if (hash2(x, y, 77) > 0.985 && x + y > bounds.minX + bounds.minY + 20) boats.push({ x: x + 0.5, y: y + 0.5 });
   }
 
-  return { canvas: px.done(), offsetX: sxMin, offsetY: syMin, land, roads, trees, lamps: dedupLamps, signs, lighthouse, boats, bounds };
+  return { canvas: px.done(), offsetX: sxMin, offsetY: syMin, land, roads, trees, lamps: dedupLamps, signs, lighthouse, boats, bounds, biome };
 }
 
 /** Tileable deep-water pattern for the open sea background. */

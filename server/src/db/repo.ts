@@ -9,6 +9,7 @@ import type {
 import { BLOCK_PITCH } from '@berrie/shared';
 import { migrate } from './migrations.js';
 import { Users } from './users.js';
+import { HostRegistry } from './hosts.js';
 
 export interface EntityRow {
   id: string;
@@ -91,6 +92,27 @@ const STATUS_COLS: Record<keyof Omit<StatusRow, 'entityId'>, string> = {
   inventoryUncertain: 'inventory_uncertain',
 };
 
+/** Spacing between island centres, in tiles. An island grows at most 4 blocks from its centre, so 13 blocks keeps open water between neighbours. */
+export const ISLAND_PITCH = 13 * BLOCK_PITCH;
+
+/**
+ * Pick a persistent origin for a new island: the nearest free slot on a grid, preferring the horizontal axis of the
+ * isometric view (+x/-y) so islands line up left-to-right before stacking. Existing origins are never moved.
+ */
+export function islandSlot(existing: { x: number; y: number }[]): { x: number; y: number } {
+  if (!existing.length) return { x: 0, y: 0 };
+  const slots: { x: number; y: number; d: number }[] = [];
+  for (let i = -8; i <= 8; i++) for (let j = -8; j <= 8; j++) {
+    const x = (i + j) * ISLAND_PITCH / 2 | 0, y = (j - i) * ISLAND_PITCH / 2 | 0;
+    const sx = x - y, sy = (x + y) / 2;
+    slots.push({ x: Math.round(x / BLOCK_PITCH) * BLOCK_PITCH, y: Math.round(y / BLOCK_PITCH) * BLOCK_PITCH, d: Math.hypot(sx, sy * 2.2) + (sx < 0 ? 0.5 : 0) });
+  }
+  slots.sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
+  const clear = (s: { x: number; y: number }) => existing.every((e) => Math.max(Math.abs(e.x - s.x), Math.abs(e.y - s.y)) >= ISLAND_PITCH * 0.6);
+  const s = slots.find(clear);
+  return s ? { x: s.x, y: s.y } : { x: (existing.length + 1) * ISLAND_PITCH, y: -(existing.length + 1) * ISLAND_PITCH };
+}
+
 export function newId(): string {
   return `${Date.now().toString(36).padStart(9, '0')}-${randomBytes(5).toString('hex')}`;
 }
@@ -98,6 +120,7 @@ export function newId(): string {
 export class Repo {
   readonly db: Database.Database;
   readonly users: Users;
+  readonly hosts: HostRegistry;
 
   constructor(
     path: string,
@@ -111,6 +134,7 @@ export class Repo {
     this.db.pragma('busy_timeout = 3000');
     migrate(this.db);
     this.users = new Users(this.db, () => this.now());
+    this.hosts = new HostRegistry(this.db, () => this.now());
     // A database belongs to exactly one mode; refuse to open the live DB in demo mode or vice versa.
     const stored = this.getSetting('origin');
     if (!stored) this.setSetting('origin', mode);
@@ -216,8 +240,8 @@ export class Repo {
     const r = this.db.prepare('SELECT ox, oy FROM districts WHERE key = ?').get(key) as Raw;
     if (r) return { x: r.ox, y: r.oy };
     const idx = ((this.db.prepare('SELECT MAX(idx) m FROM districts').get() as Raw).m ?? -1) + 1;
-    // Side by side on screen: +x/-y is the horizontal axis of the isometric view.
-    const o = { x: idx * 5 * BLOCK_PITCH, y: -idx * 5 * BLOCK_PITCH };
+    const existing = (this.db.prepare('SELECT ox, oy FROM districts').all() as Raw[]).map((d) => ({ x: d.ox as number, y: d.oy as number }));
+    const o = islandSlot(existing);
     this.db.prepare('INSERT INTO districts (key, idx, ox, oy) VALUES (?, ?, ?, ?)').run(key, idx, o.x, o.y);
     return o;
   }

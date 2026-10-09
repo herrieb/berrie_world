@@ -233,6 +233,56 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE password_resets; DROP TABLE invitations; DROP TABLE sessions; DROP TABLE user_hosts; DROP TABLE users;
     `,
   },
+  {
+    version: 3,
+    name: 'server harbor, host facts and metrics',
+    up: `
+      -- Servers registered through Server Harbor (servers from the config file are not stored here).
+      CREATE TABLE hosts (
+        id                 TEXT PRIMARY KEY,          -- slug; the host entity is host:<id>
+        name               TEXT NOT NULL,
+        tags               TEXT NOT NULL DEFAULT '[]',
+        method             TEXT NOT NULL CHECK (method IN ('ssh','agent','docker','manual')),
+        settings           TEXT NOT NULL DEFAULT '{}', -- non-secret connection settings
+        credential         TEXT,                       -- sealed with the master key; never returned by the API
+        host_key           TEXT,                       -- pinned SSH host key ("<type> <base64>"), confirmed by an admin
+        agent_token_hash   TEXT,
+        appearance         TEXT NOT NULL DEFAULT '{}',
+        status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+        created_by         TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        archived_at        TEXT,
+        last_contact_at    TEXT,
+        last_error         TEXT
+      );
+      -- Latest collected facts per host, per category, with status/source/timestamp.
+      CREATE TABLE host_facts (host_id TEXT PRIMARY KEY, facts TEXT NOT NULL, updated_at TEXT NOT NULL);
+      -- Raw samples (short retention) and hourly rollups (long retention). Every sample has a source.
+      CREATE TABLE metrics (
+        entity_id  TEXT NOT NULL,
+        metric     TEXT NOT NULL,
+        ts         TEXT NOT NULL,
+        value      REAL NOT NULL,
+        source     TEXT NOT NULL,
+        PRIMARY KEY (entity_id, metric, ts)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_metrics_ts ON metrics(ts);
+      CREATE TABLE metrics_hourly (
+        entity_id  TEXT NOT NULL,
+        metric     TEXT NOT NULL,
+        hour       TEXT NOT NULL,
+        n          INTEGER NOT NULL,
+        sum        REAL NOT NULL,
+        min        REAL NOT NULL,
+        max        REAL NOT NULL,
+        PRIMARY KEY (entity_id, metric, hour)
+      ) WITHOUT ROWID;
+    `,
+    down: `
+      DROP TABLE metrics_hourly; DROP TABLE metrics; DROP TABLE host_facts; DROP TABLE hosts;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database, target = MIGRATIONS.at(-1)!.version): void {

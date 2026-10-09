@@ -11,7 +11,9 @@ import { DemoAdapter } from './adapters/demo.js';
 import { Auth } from './api/auth.js';
 import { registerRoutes } from './api/routes.js';
 import { registerAccountRoutes } from './api/accountRoutes.js';
+import { registerHarborRoutes } from './api/harborRoutes.js';
 import { SecretBox } from './core/secrets.js';
+import type { TransportFactory } from './core/hosts.js';
 
 export interface App {
   http: FastifyInstance;
@@ -33,7 +35,7 @@ function selfContainerId(): string | null {
   }
 }
 
-export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; startScheduler?: boolean; logger?: boolean } = {}): Promise<App> {
+export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; startScheduler?: boolean; logger?: boolean; transportFactory?: TransportFactory } = {}): Promise<App> {
   const repo = new Repo(cfg.dbPath, cfg.mode, opts.clock);
   const world = new World(repo, { removal: cfg.removal, unknownAfterInventoryFailures: cfg.unknownAfterInventoryFailures });
   const http = Fastify({
@@ -41,11 +43,11 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
     trustProxy: process.env.TRUST_PROXY === 'true',
     bodyLimit: 64 * 1024,
   });
-  const scheduler = new Scheduler(cfg, world, {
-    log: (msg, extra) => http.log.warn(extra ?? {}, msg),
-  }, cfg.mode === 'demo' ? new DemoAdapter() : null);
   const auth = new Auth(cfg, repo);
   const box = new SecretBox(cfg.masterKey ?? undefined, cfg.dataDir);
+  const scheduler = new Scheduler(cfg, world, {
+    log: (msg, extra) => http.log.warn(extra ?? {}, msg),
+  }, cfg.mode === 'demo' ? new DemoAdapter() : null, { box, transportFactory: opts.transportFactory, startEvents: opts.startScheduler !== false });
   const knownHosts = () => repo.listEntities().filter((e) => e.kind === 'host').map((e) => e.id).sort();
 
   await http.register(cookie);
@@ -71,6 +73,7 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
   });
   await registerAccountRoutes(http, { cfg, repo, auth, box, knownHosts });
   await registerRoutes(http, { cfg, world, scheduler, auth, selfContainerId: selfContainerId() });
+  await registerHarborRoutes(http, { repo, world, scheduler, auth, box, transportFactory: opts.transportFactory });
 
   if (cfg.webDist && existsSync(cfg.webDist)) {
     await http.register(fastifyStatic, { root: cfg.webDist, wildcard: false });

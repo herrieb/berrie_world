@@ -1,11 +1,13 @@
 import { Application, Container, Graphics, Polygon, Sprite, Texture, TextureSource, TilingSprite } from 'pixi.js';
-import type { BlockView, EntityView, Health, WorldEvent } from '@berrie/shared';
+import type { Biome, BlockView, EntityView, Health, WorldEvent } from '@berrie/shared';
+import { BLOCK_PITCH } from '@berrie/shared';
 import { effectiveHealth } from '@berrie/shared';
 import {
   buildingArt, ruinsArt, scaffoldArt, treeArt, rockArt, lampArt, signpostArt, lighthouseArt, boatArt, personArt,
   vanArt, cloudArt, glowCanvas, markerArt, type SpriteArt,
 } from './art';
-import { buildTerrain, seaPattern, roadPath, nearestRoad, type Terrain, type Rect } from './terrain';
+import { buildTerrain, seaPattern, roadPath, nearestRoad, TREE_TINT, type Terrain, type Rect } from './terrain';
+import { capacityTier, hostFacts, pressure } from '../ui/facts';
 import { TW, TH, hex, hashStr } from './pixel';
 import { HEALTH_COLOR, hexNum, iconSvg, statusText, esc } from '../ui/status';
 
@@ -17,7 +19,41 @@ export interface RendererCallbacks {
   onCamera?: () => void;
   /** Fired ~1.5 s after the user stops moving the camera. */
   onCameraSettled?: (camera: { x: number; y: number; zoom: number }) => void;
+  /** Personal island arrangement: a whole island was dragged to a new offset (in tiles). */
+  onIslandMoved?: (district: string, offset: { dx: number; dy: number }) => void;
 }
+
+/** Merged view of all islands, used for pathing, placement checks and bounds. */
+interface World2D {
+  roads: Set<string>;
+  land: Set<string>;
+  islands: Terrain[];
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+}
+
+interface Island { key: string; terrain: Terrain; sprite: Sprite; props: Sprite[]; glows: Sprite[] }
+
+/** Each server is its own island: entities belong to their host's district, everything else to 'external'. */
+/** One-line capacity/usage summary for island labels — only collected values, stale ones marked with ~. */
+function hostLine(e: EntityView): string {
+  const f = hostFacts(e);
+  if (!f) return '';
+  const v = <T,>(x: { status: string; value: T | null }) => (x.status === 'confirmed' || x.status === 'stale' ? x.value : null);
+  const mark = (x: { status: string }) => (x.status === 'stale' ? '~' : '');
+  const parts: string[] = [];
+  const cpu = v(f.cpu), mem = v(f.memory), disk = v(f.storage)?.filesystems.find((x) => x.mount === '/') ?? v(f.storage)?.filesystems[0];
+  if (cpu) parts.push(`${mark(f.cpu)}${cpu.cores} cores${cpu.usagePct != null ? ` ${Math.round(cpu.usagePct)}%` : ''}`);
+  if (mem?.usedPct != null) parts.push(`${mark(f.memory)}mem ${Math.round(mem.usedPct)}%`);
+  if (disk) parts.push(`${mark(f.storage)}disk ${Math.round(disk.usedPct)}%`);
+  const pr = pressure(f);
+  const html = parts.length ? `<span class="hf">${esc(parts.join(' · '))}</span>` : '';
+  return html + (pr.length ? `<span class="pr">▲ ${esc(pr[0].label)}</span>` : '');
+}
+
+export const districtOf = (e: Pick<EntityView, 'kind' | 'id' | 'hostId'>): string => (e.kind === 'host' ? e.id : e.hostId ?? 'external');
 
 export interface RenderState {
   entities: EntityView[];
@@ -28,6 +64,12 @@ export interface RenderState {
   daylight: 'auto' | 'day' | 'night';
   editLayout: boolean;
   labelDensity?: 'less' | 'auto' | 'more';
+  /** Personal island offsets in tiles, keyed by district (host entity id). */
+  offsets?: Record<string, { dx: number; dy: number }>;
+  /** Island biome per district (from the host's Harbor appearance). */
+  biomes?: Record<string, Biome>;
+  /** Personal "arrange islands" mode: drag whole islands. */
+  arrangeIslands?: boolean;
   /** Personal saved camera, used instead of fitting the whole world on first load. */
   initialCamera?: { x: number; y: number; zoom: number } | null;
 }
@@ -72,7 +114,10 @@ export class WorldRenderer {
   app = new Application();
   private world = new Container();
   private worldTop = new Container();
-  private ground = new Sprite();
+  private groundLayer = new Container();
+  private islands = new Map<string, Island>();
+  private arrangeGhost = new Graphics();
+  private dragIsland: { district: string; start: [number, number]; delta: [number, number] } | null = null;
   private rings = new Graphics();
   private objects = new Container();
   private effects = new Container();
@@ -87,8 +132,7 @@ export class WorldRenderer {
   private couriers: Courier[] = [];
   private particles: Particle[] = [];
   private tex = new Map<string, Texture>();
-  private terrain: Terrain | null = null;
-  private terrainKey = '';
+  private terrain: World2D | null = null;
   private state: RenderState | null = null;
   private cam = { x: 0, y: 0, zoom: 2.5 };
   private camTarget: { x: number; y: number; zoom: number } | null = null;
@@ -113,7 +157,7 @@ export class WorldRenderer {
     this.sea = new TilingSprite({ texture: this.seaFrames[0], width: this.app.screen.width, height: this.app.screen.height });
     this.objects.sortableChildren = true;
     this.lights.blendMode = 'add';
-    this.world.addChild(this.ground, this.rings, this.shadowLayer, this.objects, this.effects);
+    this.world.addChild(this.groundLayer, this.rings, this.shadowLayer, this.objects, this.effects, this.arrangeGhost);
     this.worldTop.addChild(this.lights, this.cloudLayer);
     this.app.stage.addChild(this.sea, this.world, this.night, this.worldTop);
     this.setupInput();
@@ -146,16 +190,36 @@ export class WorldRenderer {
 
   // ------------------------------------------------------------------ state sync
 
+  private offsetOf(district: string): { dx: number; dy: number } {
+    return this.state?.offsets?.[district] ?? { dx: 0, dy: 0 };
+  }
+
+  /** Layout of an entity in render space (shared layout + this user's island offset). */
+  private placed(e: EntityView): Rect {
+    const o = this.offsetOf(districtOf(e));
+    return { x: e.layout!.x + o.dx, y: e.layout!.y + o.dy, w: e.layout!.w, h: e.layout!.h };
+  }
+
   update(s: RenderState): void {
     this.state = s;
     if (!this.app.renderer) return;
     const withBuildings = s.entities.filter((e) => e.layout && e.lifecycle !== 'archived');
-    const rects = withBuildings.map((e) => ({ x: e.layout!.x, y: e.layout!.y, w: e.layout!.w, h: e.layout!.h }));
-    const tKey = JSON.stringify(s.blocks.map((b) => [b.x, b.y, b.size, b.group])) + '|' + JSON.stringify(rects);
-    if (tKey !== this.terrainKey) { this.terrainKey = tKey; this.rebuildTerrain(s.blocks, rects); }
+    // Group blocks and building footprints per island.
+    const groups = new Map<string, { blocks: BlockView[]; rects: Rect[] }>();
+    const grp = (d: string) => { let g = groups.get(d); if (!g) { g = { blocks: [], rects: [] }; groups.set(d, g); } return g; };
+    for (const b of s.blocks) { const o = this.offsetOf(b.district); grp(b.district).blocks.push({ ...b, x: b.x + o.dx, y: b.y + o.dy }); }
+    for (const e of withBuildings) grp(districtOf(e)).rects.push(this.placed(e));
+    let changed = false;
+    for (const [d, g] of groups) {
+      const biome = s.biomes?.[d] ?? 'meadow';
+      const key = JSON.stringify([g.blocks.map((b) => [b.x, b.y, b.size, b.group]), g.rects, biome]);
+      if (this.islands.get(d)?.key !== key) { this.rebuildIsland(d, key, g.blocks, g.rects, biome); changed = true; }
+    }
+    for (const d of [...this.islands.keys()]) if (!groups.has(d)) { this.destroyIsland(d); changed = true; }
+    if (changed || !this.terrain) this.mergeIslands();
 
     const seen = new Set<string>();
-    for (const e of withBuildings) { seen.add(e.id); this.syncBuilding(e, s); }
+    for (const e of withBuildings) { seen.add(e.id); this.syncBuilding(e, s, this.placed(e)); }
     for (const [id, n] of this.nodes) if (!seen.has(id)) { n.root.destroy({ children: true }); n.label.remove(); this.nodes.delete(id); }
     this.drawRings();
     this.placeLabels();
@@ -165,41 +229,65 @@ export class WorldRenderer {
     }
   }
 
-  private rebuildTerrain(blocks: BlockView[], rects: Rect[]): void {
-    const t = buildTerrain(blocks, rects);
-    this.terrain = t;
-    const old = this.ground.texture;
+  private rebuildIsland(district: string, key: string, blocks: BlockView[], rects: Rect[], biome: Biome): void {
+    this.destroyIsland(district);
+    const t = buildTerrain(blocks, rects, biome);
     const tex = Texture.from(t.canvas);
     tex.source.scaleMode = 'nearest';
-    this.ground.texture = tex;
-    this.ground.position.set(t.offsetX, t.offsetY);
-    if (old && old !== Texture.EMPTY) old.destroy(true);
-    for (const p of this.props) p.destroy({ children: true });
-    this.props = [];
-    for (const l of this.lights.removeChildren()) l.destroy();
+    const sprite = new Sprite(tex);
+    sprite.position.set(t.offsetX, t.offsetY);
+    this.groundLayer.addChild(sprite);
+    const isl: Island = { key, terrain: t, sprite, props: [], glows: [] };
     const glowWarm = this.texFrom('glow-warm', () => glowCanvas('rgba(255,210,120,0.9)'));
+    const tint = TREE_TINT[biome] ?? 0xffffff;
     for (const tr of t.trees) {
       const a = tr.kind === 'rock' ? this.art(`rock${tr.seed % 3}`, () => rockArt(tr.seed % 3)) : this.art(`${tr.kind}${tr.seed % 5}`, () => treeArt(tr.kind as 'pine', tr.seed % 5));
-      this.addProp(a, `t:${tr.kind}${tr.seed % 5}${tr.kind === 'rock' ? 'r' : ''}`, tr.x, tr.y);
+      const p = this.addProp(a, `t:${tr.kind}${tr.seed % 5}${tr.kind === 'rock' ? 'r' : ''}`, tr.x, tr.y);
+      if (tr.kind !== 'rock' && (biome !== 'autumn' || tr.kind !== 'pine')) p.tint = tint;
+      isl.props.push(p);
     }
     for (const l of t.lamps) {
-      this.addProp(this.art('lamp', lampArt), 'lamp', l.x, l.y);
+      isl.props.push(this.addProp(this.art('lamp', lampArt), 'lamp', l.x, l.y));
       const g = new Sprite(glowWarm);
       g.anchor.set(0.5);
       g.scale.set(0.9);
       g.position.set(isoX(l.x, l.y), isoY(l.x, l.y) - 17);
       g.label = 'lamp-glow';
+      g.alpha = this.darkness;
       this.lights.addChild(g);
+      isl.glows.push(g);
     }
-    for (const sgn of t.signs) this.addProp(this.art('sign', signpostArt), 'sign', sgn.x, sgn.y);
-    if (t.lighthouse) this.addProp(this.art('lighthouse', lighthouseArt), 'lighthouse', t.lighthouse.x, t.lighthouse.y);
+    for (const sgn of t.signs) isl.props.push(this.addProp(this.art('sign', signpostArt), 'sign', sgn.x, sgn.y));
+    if (t.lighthouse) isl.props.push(this.addProp(this.art('lighthouse', lighthouseArt), 'lighthouse', t.lighthouse.x, t.lighthouse.y));
     for (const b of t.boats) {
       const c = this.addProp(this.art('boat', boatArt), 'boat', b.x, b.y);
       c.label = 'boat';
+      isl.props.push(c);
     }
+    this.islands.set(district, isl);
   }
 
-  private addProp(a: SpriteArt, key: string, x: number, y: number): Container {
+  private destroyIsland(district: string): void {
+    const isl = this.islands.get(district);
+    if (!isl) return;
+    isl.sprite.texture.destroy(true);
+    isl.sprite.destroy();
+    for (const p of isl.props) { this.props = this.props.filter((x) => x !== p); p.destroy(); }
+    for (const g of isl.glows) g.destroy();
+    this.islands.delete(district);
+  }
+
+  private mergeIslands(): void {
+    const ts = [...this.islands.values()].map((i) => i.terrain);
+    const roads = new Set<string>(), land = new Set<string>();
+    for (const t of ts) { for (const r of t.roads) roads.add(r); for (const l of t.land) land.add(l); }
+    if (!ts.length) { this.terrain = { roads, land, islands: [], offsetX: -400, offsetY: -200, width: 800, height: 400 }; return; }
+    const x0 = Math.min(...ts.map((t) => t.offsetX)), y0 = Math.min(...ts.map((t) => t.offsetY));
+    const x1 = Math.max(...ts.map((t) => t.offsetX + t.canvas.width)), y1 = Math.max(...ts.map((t) => t.offsetY + t.canvas.height));
+    this.terrain = { roads, land, islands: ts, offsetX: x0, offsetY: y0, width: x1 - x0, height: y1 - y0 };
+  }
+
+  private addProp(a: SpriteArt, key: string, x: number, y: number): Sprite {
     const s = new Sprite(this.artTex(`prop:${key}`, a));
     s.position.set(isoX(x, y) - a.ox, isoY(x, y) - a.oy);
     s.zIndex = (x + y) * 10;
@@ -208,13 +296,14 @@ export class WorldRenderer {
     return s;
   }
 
-  private syncBuilding(e: EntityView, s: RenderState): void {
-    const l = e.layout!;
+  private syncBuilding(e: EntityView, s: RenderState, l: Rect): void {
     const seed = Math.floor(hashStr(e.id) * 4);
     const removed = e.lifecycle === 'removed';
-    const artKey = removed ? `ruins${seed}` : `${e.buildingType}${seed}`;
+    const facts = e.kind === 'host' ? hostFacts(e) : null;
+    const tier = e.buildingType === 'server' ? capacityTier(facts) : null;
+    const artKey = removed ? `ruins${seed}` : `${e.buildingType}${seed}${tier ? `t${tier}` : ''}`;
     let n = this.nodes.get(e.id);
-    const art = this.art(artKey, () => (removed ? ruinsArt(seed) : buildingArt(e.buildingType, seed)));
+    const art = this.art(artKey, () => (removed ? ruinsArt(seed) : buildingArt(e.buildingType, seed, { tier })));
     if (!n) {
       const root = new Container();
       const sprite = new Sprite(this.artTex(`b:${artKey}`, art));
@@ -281,7 +370,7 @@ export class WorldRenderer {
     }
 
     // floating marker
-    const mk = removed ? null : e.lifecycle === 'missing' ? 'missing' : h === 'host_offline' && e.kind === 'host' ? 'offline' : h === 'unhealthy' || h === 'unreachable' ? 'warn' : null;
+    const mk = removed ? null : e.lifecycle === 'missing' ? 'missing' : h === 'host_offline' && e.kind === 'host' ? 'offline' : h === 'unhealthy' || h === 'unreachable' ? 'warn' : pressure(facts).length ? 'pressure' : null;
     if (mk !== n.markerKind) {
       n.marker?.destroy();
       n.marker = null;
@@ -329,14 +418,15 @@ export class WorldRenderer {
       const threshold = density === 'more' ? 0.75 : density === 'less' ? 1.9 : 1.15;
       const show = match && (selected || problem || e.kind === 'host' || z >= threshold || this.nodes.size <= 12);
       const compact = z < 0.9 && !selected;
-      const key = `${e.displayName}|${st.text}|${st.color}|${compact}|${selected}|${e.inventoryUncertain}|${e.buildingType}|${e.lifecycle}`;
+      const hf = e.kind === 'host' ? hostLine(e) : '';
+      const key = `${e.displayName}|${st.text}|${st.color}|${compact}|${selected}|${e.inventoryUncertain}|${e.buildingType}|${e.lifecycle}|${hf}`;
       if (key !== n.labelKey) {
         n.labelKey = key;
         n.label.className = `blabel${selected ? ' sel' : ''}${compact ? ' compact' : ''}${e.lifecycle === 'removed' ? ' removed' : ''}${e.lifecycle === 'missing' ? ' missing' : ''}${e.inventoryUncertain ? ' uncertain' : ''}`;
         n.label.style.setProperty('--st', st.color);
         n.label.innerHTML = compact
           ? `<span class="dot"></span><span class="nm">${esc(e.displayName)}</span>`
-          : `<span class="ic">${iconSvg(e.buildingType, 14)}</span><span class="tx"><span class="nm">${esc(e.displayName)}</span><span class="st"><span class="dot"></span>${esc(st.text)}${e.inventoryUncertain ? ' · stale' : ''}</span></span>`;
+          : `<span class="ic">${iconSvg(e.buildingType, 14)}</span><span class="tx"><span class="nm">${esc(e.displayName)}</span><span class="st"><span class="dot"></span>${esc(st.text)}${e.inventoryUncertain ? ' · stale' : ''}</span>${hf}</span>`;
         n.labelW = 0;
       }
       const sx = n.beacon.x * z + this.world.x, sy = (n.beacon.y - 8) * z + this.world.y;
@@ -399,6 +489,8 @@ export class WorldRenderer {
     if (!this.terrain || this.couriers.length > 40) return;
     const ra = nearestRoad(this.terrain.roads, a), rb = nearestRoad(this.terrain.roads, b);
     let path: [number, number][] | null = ra && rb ? roadPath(this.terrain.roads, ra, rb) : null;
+    // No walking on water: between islands without a road, the event stays in the feed only.
+    if (!path && Math.hypot(a.x - b.x, a.y - b.y) > 30) return;
     if (!path || path.length > 160) path = [[a.x + a.w / 2, a.y + a.h], [b.x + b.w / 2, b.y + b.h]];
     else path = path.map(([x, y]) => [x + 0.5, y + 0.5]);
     path = [[a.x + a.w / 2, a.y + a.h / 2], ...path, [b.x + b.w / 2, b.y + b.h / 2]];
@@ -465,7 +557,7 @@ export class WorldRenderer {
 
   private worldBounds(): { x: number; y: number; w: number; h: number } {
     if (!this.terrain) return { x: -400, y: -200, w: 800, h: 400 };
-    return { x: this.terrain.offsetX, y: this.terrain.offsetY, w: this.terrain.canvas.width, h: this.terrain.canvas.height };
+    return { x: this.terrain.offsetX, y: this.terrain.offsetY, w: this.terrain.width, h: this.terrain.height };
   }
 
   private computeDarkness(): number {
@@ -596,7 +688,7 @@ export class WorldRenderer {
     const ys = rs.flatMap((r) => [isoY(r.x, r.y) - 60, isoY(r.x + r.w, r.y + r.h)]);
     const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
     const W = this.app.screen.width, H = this.app.screen.height;
-    const zoom = Math.max(0.6, Math.min(3.5, Math.min((W * 0.7) / (maxX - minX + 120), (H * 0.75) / (maxY - minY + 120))));
+    const zoom = Math.max(0.3, Math.min(3.5, Math.min((W * 0.7) / (maxX - minX + 120), (H * 0.75) / (maxY - minY + 120))));
     this.cam = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom };
     this.applyCamera();
   }
@@ -610,7 +702,7 @@ export class WorldRenderer {
 
   zoomBy(f: number, sx = this.app.screen.width / 2, sy = this.app.screen.height / 2): void {
     const z0 = this.cam.zoom;
-    const z1 = Math.max(0.5, Math.min(6, z0 * f));
+    const z1 = Math.max(0.25, Math.min(6, z0 * f));
     const wx = (sx - this.world.x) / z0, wy = (sy - this.world.y) / z0;
     this.cam.zoom = z1;
     this.cam.x = wx - (sx - this.app.screen.width / 2) / z1;
@@ -624,7 +716,7 @@ export class WorldRenderer {
   }
 
   /** Data for the minimap. */
-  minimap(): { terrain: Terrain | null; nodes: { rect: Rect; color: string }[]; view: { x: number; y: number; w: number; h: number } } {
+  minimap(): { terrain: World2D | null; nodes: { rect: Rect; color: string }[]; view: { x: number; y: number; w: number; h: number } } {
     const z = this.cam.zoom;
     return {
       terrain: this.terrain,
@@ -645,6 +737,7 @@ export class WorldRenderer {
     el.addEventListener('pointerdown', (e) => {
       this.pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
       this.dragMoved = false;
+      if (this.state?.arrangeIslands && this.pointers.size === 1) this.startIslandDrag(e.offsetX, e.offsetY);
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
         this.pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
@@ -653,6 +746,7 @@ export class WorldRenderer {
     el.addEventListener('pointermove', (e) => {
       const prev = this.pointers.get(e.pointerId);
       if (this.dragBuilding) { this.moveBuildingDrag(e.offsetX, e.offsetY); return; }
+      if (this.dragIsland) { this.moveIslandDrag(e.offsetX, e.offsetY); this.dragMoved = true; return; }
       if (!prev) return;
       const cur = { x: e.offsetX, y: e.offsetY };
       this.pointers.set(e.pointerId, cur);
@@ -678,6 +772,7 @@ export class WorldRenderer {
       this.pointers.delete(e.pointerId);
       if (this.pointers.size < 2) this.pinchDist = 0;
       if (this.dragBuilding) this.endBuildingDrag();
+      if (this.dragIsland) this.endIslandDrag();
     };
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
@@ -698,6 +793,58 @@ export class WorldRenderer {
       else if (e.key === 'ArrowDown') { this.cam.y += step; this.applyCamera(); }
       else if (e.key === 'Escape') this.cb.onSelect(null);
     });
+  }
+
+  // ------------------------------------------------------------------ personal island arrangement
+
+  private islandAt(sx: number, sy: number): string | null {
+    const [tx, ty] = this.screenToTile(sx, sy);
+    const k = `${Math.floor(tx)},${Math.floor(ty)}`;
+    for (const [d, isl] of this.islands) if (isl.terrain.land.has(k)) return d;
+    return null;
+  }
+
+  private islandBox(d: string, delta: [number, number] = [0, 0]): Rect {
+    const b = this.islands.get(d)!.terrain.bounds;
+    return { x: b.minX + 8 + delta[0], y: b.minY + 8 + delta[1], w: b.maxX - b.minX - 16, h: b.maxY - b.minY - 16 };
+  }
+
+  private islandFits(d: string, delta: [number, number]): boolean {
+    const r = this.islandBox(d, delta);
+    for (const other of this.islands.keys()) {
+      if (other === d) continue;
+      const o = this.islandBox(other);
+      if (r.x < o.x + o.w + 4 && o.x < r.x + r.w + 4 && r.y < o.y + o.h + 4 && o.y < r.y + r.h + 4) return false;
+    }
+    return true;
+  }
+
+  private startIslandDrag(sx: number, sy: number): void {
+    const d = this.islandAt(sx, sy);
+    if (!d) return;
+    this.dragIsland = { district: d, start: this.screenToTile(sx, sy), delta: [0, 0] };
+  }
+
+  private moveIslandDrag(sx: number, sy: number): void {
+    const di = this.dragIsland!;
+    const [tx, ty] = this.screenToTile(sx, sy);
+    // Snap to whole city blocks so roads keep lining up visually.
+    di.delta = [Math.round((tx - di.start[0]) / BLOCK_PITCH) * BLOCK_PITCH, Math.round((ty - di.start[1]) / BLOCK_PITCH) * BLOCK_PITCH];
+    const r = this.islandBox(di.district, di.delta);
+    const ok = this.islandFits(di.district, di.delta);
+    const pts = [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].flatMap(([a, b]) => [isoX(a, b), isoY(a, b)]);
+    this.arrangeGhost.clear().poly(pts).fill({ color: ok ? 0x5ab0ff : 0xef4b4b, alpha: 0.18 }).stroke({ width: 2, color: ok ? 0x5ab0ff : 0xef4b4b, alpha: 0.9 });
+  }
+
+  private endIslandDrag(): void {
+    const di = this.dragIsland!;
+    this.dragIsland = null;
+    this.arrangeGhost.clear();
+    if ((di.delta[0] || di.delta[1]) && this.islandFits(di.district, di.delta)) {
+      const o = this.offsetOf(di.district);
+      this.cb.onIslandMoved?.(di.district, { dx: o.dx + di.delta[0], dy: o.dy + di.delta[1] });
+    }
+    setTimeout(() => { this.dragMoved = false; }, 0);
   }
 
   // ------------------------------------------------------------------ layout editor
@@ -742,7 +889,11 @@ export class WorldRenderer {
     const n = this.nodes.get(d.id);
     if (!n) return;
     const [x, y] = d.tile;
-    if ((x !== n.rect.x || y !== n.rect.y) && this.canPlace(d.id, { x, y, w: n.rect.w, h: n.rect.h })) this.cb.onMove(d.id, x, y);
+    if ((x !== n.rect.x || y !== n.rect.y) && this.canPlace(d.id, { x, y, w: n.rect.w, h: n.rect.h })) {
+      // The shared layout is stored without this user's personal island offset.
+      const o = this.offsetOf(districtOf(n.entity));
+      this.cb.onMove(d.id, x - o.dx, y - o.dy);
+    }
     this.dragMoved = true;
     setTimeout(() => { this.dragMoved = false; }, 0);
   }

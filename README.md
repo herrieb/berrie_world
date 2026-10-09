@@ -71,6 +71,43 @@ Everyone signs in with a personal account. On first start nobody exists yet: the
 - Personal (per-user, never shared): camera, island arrangement, favorites, saved views, tasks, notification settings.
 - Recovery from a shell: `docker exec berrie-world node server/dist/cli.js list-users | reset-password <user> | disable-mfa <user>`.
 
+## Islands and Server Harbor
+
+Every server is its own persistent island (origins are assigned once on a grid and never move). Servers come from the
+config file or are registered at runtime in **Server Harbor** (admins), with one of these discovery methods:
+
+| Method | What it collects | Access needed |
+|---|---|---|
+| SSH | host facts via one fixed read-only collector; optionally containers through a forwarded Docker socket or a read-only socket proxy on the server | a dedicated user; key restricted in `authorized_keys` |
+| Agent | the same collector, pushed every minute by a POSIX shell script (`curl` only) with a per-host token; optionally containers via a local read-only proxy | none inbound |
+| Docker API | containers from a read-only docker-socket-proxy URL | network access to the proxy |
+| Manual | nothing (optional TCP reachability probe) | none |
+
+- SSH host keys are fetched, shown as a fingerprint and must be confirmed by an admin before the first connection;
+  they are pinned and a mismatch refuses the connection. There is no "skip host-key check".
+- Harbor can generate a dedicated ed25519 key per server (only the public key is shown) or accept a pasted key or
+  password. Credentials are sealed with `BERRIE_MASTER_KEY` (AES-256-GCM), never returned by the API or logged, and
+  deleted when a server is archived.
+- Every new server is tested first: the preview lists exactly which facts and containers would be imported.
+- Suspend stops monitoring (state becomes *unknown*, nothing is removed). Archive (type the id to confirm) is the
+  explicit evidence that removes a whole server from the map; its history stays in the archive.
+- Config-file servers can get Harbor extras (name, tags, biome, an agent, suspension); their connection stays in the file.
+
+### Host facts and metrics
+
+Each category (hostname, OS, CPU, memory, storage, network, uptime/load, containers) carries a status:
+`confirmed`, `stale` (shown with its age), `unavailable` (a collector tried and failed, with the reason),
+`unconfigured` (nothing collects it) or `unknown` (no result yet). Values are never shown, charted or used for visuals
+unless collected. Docker-only servers know memory *size* but not usage, and say so.
+
+Samples are stored with their source and timestamp (`metrics`, raw for `retention.metricRawDays`, default 7) plus
+hourly min/avg/max rollups (`retention.metricHourlyDays`, default 365). Charts appear only with enough samples and show
+gaps instead of interpolating. Island visuals: server tower height follows the *confirmed* CPU count (a neutral tower
+when unknown); a pressure marker appears for collected memory/disk ≥ 90 %, CPU ≥ 95 % or load ≥ 2× cores.
+
+Agent install (shown in Harbor with the token): an unprivileged `berrie-agent` user, `/usr/local/bin/berrie-agent`,
+a 0600 `/etc/berrie-agent.env`, and a systemd timer (hardened unit: `NoNewPrivileges`, `ProtectSystem=strict`).
+
 ## Configuration
 
 Environment (see `.env.example`): `ADMIN_TOKEN` (bootstrap), `BERRIE_MASTER_KEY`, `SESSION_DAYS`, `SESSION_IDLE_HOURS`,

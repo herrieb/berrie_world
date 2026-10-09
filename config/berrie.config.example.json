@@ -32,5 +32,5 @@
   "protected": ["container:cloudflared"],
   "canary": { "host": "1.1.1.1", "port": 443 },
   "removal": { "confirmations": 3, "minMissingSeconds": 120, "archiveAfterHours": 24 },
-  "retention": { "checkResultDays": 7, "eventDays": 90, "auditDays": 365, "archivedEntityDays": null }
+  "retention": { "checkResultDays": 7, "eventDays": 90, "auditDays": 365, "archivedEntityDays": null, "metricRawDays": 7, "metricHourlyDays": 365 }
 }

@@ -56,7 +56,7 @@ export interface AppConfig {
   secureCookies: boolean;
   discoveryIntervalSeconds: number;
   removal: { confirmations: number; minMissingSeconds: number; archiveAfterHours: number };
-  retention: { checkResultDays: number; eventDays: number; auditDays: number; archivedEntityDays: number | null };
+  retention: { checkResultDays: number; eventDays: number; auditDays: number; archivedEntityDays: number | null; metricRawDays: number; metricHourlyDays: number };
   /** Docker inventory failures before own health is reported as unknown. */
   unknownAfterInventoryFailures: number;
   hosts: HostConfig[];
@@ -116,6 +116,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       eventDays: file.retention?.eventDays ?? 90,
       auditDays: file.retention?.auditDays ?? 365,
       archivedEntityDays: file.retention?.archivedEntityDays ?? null,
+      metricRawDays: file.retention?.metricRawDays ?? 7,
+      metricHourlyDays: file.retention?.metricHourlyDays ?? 365,
     },
     unknownAfterInventoryFailures: file.unknownAfterInventoryFailures ?? 2,
     hosts,

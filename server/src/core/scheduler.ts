@@ -1,11 +1,13 @@
 import type { AdapterStatus, HostnameHint } from '@berrie/shared';
 import type { AppConfig, CheckConfig } from '../config.js';
-import { DockerAdapter, hostEntityId } from '../adapters/docker.js';
+import { hostEntityId } from '../adapters/docker.js';
 import { configInventory, describeCheck, endpointInventory, hintStatus } from '../adapters/config.js';
 import { runProbe, tcpProbe } from '../adapters/probes.js';
 import type { DemoAdapter } from '../adapters/demo.js';
 import { redactError } from './redact.js';
 import type { World } from './world.js';
+import { HostManager, type TransportFactory } from './hosts.js';
+import type { SecretBox } from './secrets.js';
 
 interface ScheduledCheck {
   entityId: string;
@@ -24,7 +26,7 @@ export interface SchedulerHooks {
 const MAX_CONCURRENT_CHECKS = 4;
 
 export class Scheduler {
-  readonly docker = new Map<string, DockerAdapter>();
+  readonly hosts: HostManager;
   private checks = new Map<string, ScheduledCheck>();
   private timers: NodeJS.Timeout[] = [];
   private cycleRunning = false;
@@ -40,8 +42,24 @@ export class Scheduler {
     private readonly world: World,
     private readonly hooks: SchedulerHooks = {},
     private readonly demo: DemoAdapter | null = null,
+    opts: { box: SecretBox; transportFactory?: TransportFactory; startEvents?: boolean },
   ) {
-    if (!demo) for (const h of cfg.hosts) if (h.docker) this.docker.set(h.id, new DockerAdapter(h));
+    this.hosts = new HostManager(cfg, world.repo, world, opts.box, {
+      onDockerEvent: (hostId, ev) => this.onDockerEvent(hostId, ev),
+      log: (m, e) => this.log(m, e),
+      canary: async () => !cfg.canary || (await tcpProbe({ type: 'tcp', host: cfg.canary.host, port: cfg.canary.port, timeoutMs: 3000 })).outcome === 'ok',
+    }, opts.transportFactory, opts.startEvents ?? true);
+  }
+
+  get docker() {
+    return this.hosts.docker;
+  }
+
+  /** Apply Server Harbor changes now (new/edited/suspended/archived hosts) and run discovery. */
+  hostsChanged(): void {
+    if (this.demo) return;
+    this.hosts.sync();
+    void this.cycle();
   }
 
   private log(msg: string, extra?: Record<string, unknown>) {
@@ -49,13 +67,12 @@ export class Scheduler {
   }
 
   start(): void {
+    if (!this.demo) this.hosts.sync();
     void this.cycle();
     this.timers.push(setInterval(() => void this.cycle(), this.cfg.discoveryIntervalSeconds * 1000));
     this.timers.push(setInterval(() => void this.monitorTick(), 5000));
     this.timers.push(setInterval(() => this.retention(), 3600_000));
-    for (const [hostId, d] of this.docker) {
-      d.startEvents((ev) => this.onDockerEvent(hostId, ev));
-    }
+    if (!this.demo) this.timers.push(setInterval(() => void this.hosts.collectTick(), 5000));
     if (this.demo) this.timers.push(setInterval(() => this.demo!.tickActivity(this.world), 2500));
     for (const t of this.timers) t.unref();
   }
@@ -64,32 +81,49 @@ export class Scheduler {
     this.stopped = true;
     for (const t of this.timers) clearInterval(t);
     if (this.debounce) clearTimeout(this.debounce);
-    for (const d of this.docker.values()) d.stop();
+    this.hosts.stop();
   }
 
-  /** One discovery cycle. Each adapter is isolated: one failing never stops the others. */
-  async cycle(): Promise<void> {
-    if (this.stopped) return;
-    if (this.cycleRunning) { this.cyclePending = true; return; }
+  private running: Promise<void> | null = null;
+
+  /** One discovery cycle. Concurrent calls share the running cycle and schedule one more afterwards. */
+  cycle(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.running) { this.cyclePending = true; return this.running; }
+    this.running = this.runCycle().finally(() => {
+      this.running = null;
+      if (this.cyclePending) { this.cyclePending = false; void this.cycle(); }
+    });
+    return this.running;
+  }
+
+  /** Each adapter is isolated: one failing never stops the others. */
+  private async runCycle(): Promise<void> {
     this.cycleRunning = true;
     try {
       if (this.demo) {
         for (const inv of this.demo.inventory()) this.world.reconcile(inv);
         this.demo.applyHealth(this.world);
       } else {
-        const hostMeta = new Map([...this.docker].map(([id, d]) => [id, d.hostInfo]));
-        this.safe('config', () => this.world.reconcile(configInventory(this.cfg, hostMeta)));
+        const describe = () => new Map(this.hosts.resolve().filter((h) => h.source === 'config').map((h) => [h.id, { name: h.name, meta: this.hosts.hostMeta(h) }]));
+        this.safe('config', () => this.world.reconcile(configInventory(this.cfg, describe())));
+        this.safe('harbor', () => this.world.reconcile(this.hosts.hostInventory()));
         await Promise.all([...this.docker].map(async ([hostId, d]) => {
           try {
             const inv = await d.inventory();
+            // The host may have been suspended, archived or reconfigured while this inventory was in flight:
+            // a stale result must never touch its entities (it could even resurrect archived ones).
+            if (this.docker.get(hostId) !== d) return;
             this.world.reconcile(inv);
             this.world.setHostSignal(hostEntityId(hostId), { docker: inv.completeness === 'unavailable' ? 'fail' : 'ok', dockerError: inv.error ?? null });
+            if (inv.completeness !== 'unavailable') this.hosts.applyDockerInfo(hostId);
           } catch (err) {
             this.log('docker adapter failed', { hostId, error: redactError(err) });
           }
         }));
-        // Re-run config so host metadata from Docker /info is attached.
-        this.safe('config', () => this.world.reconcile(configInventory(this.cfg, new Map([...this.docker].map(([id, d]) => [id, d.hostInfo])))));
+        // Re-run host inventories so metadata from Docker /info and collectors is attached.
+        this.safe('config', () => this.world.reconcile(configInventory(this.cfg, describe())));
+        this.safe('harbor', () => this.world.reconcile(this.hosts.hostInventory()));
         try {
           const plan = await endpointInventory(this.cfg, this.world.repo);
           this.world.reconcile(plan.inventory);
@@ -110,7 +144,6 @@ export class Scheduler {
       this.log('discovery cycle failed', { error: redactError(err) });
     } finally {
       this.cycleRunning = false;
-      if (this.cyclePending) { this.cyclePending = false; void this.cycle(); }
     }
   }
 
@@ -118,7 +151,7 @@ export class Scheduler {
     try { fn(); } catch (err) { this.log(`${name} adapter failed`, { error: redactError(err) }); }
   }
 
-  private onDockerEvent(hostId: string, ev: { action: string; entityId: string | null; name: string; attrs: Record<string, string> }): void {
+  onDockerEvent(hostId: string, ev: { action: string; entityId: string | null; name: string; attrs: Record<string, string> }): void {
     const action = ev.action.split(':')[0];
     const known = ev.entityId ? this.world.repo.getEntity(ev.entityId) : undefined;
     const source = `docker:${hostId}`;
@@ -141,6 +174,7 @@ export class Scheduler {
     for (const c of endpointChecks) wanted.set(`${c.entityId}|${describeCheck(c.check)}`, c);
     for (const s of this.cfg.services) if (s.check) wanted.set(`manual:${s.id}|${describeCheck(s.check)}`, { entityId: `manual:${s.id}`, check: s.check });
     for (const h of this.cfg.hosts) if (h.probe) wanted.set(`${hostEntityId(h.id)}|${describeCheck(h.probe)}`, { entityId: hostEntityId(h.id), check: h.probe });
+    for (const p of this.hosts.probes()) wanted.set(`${p.entityId}|${describeCheck(p.check)}`, p);
     for (const k of this.checks.keys()) if (!wanted.has(k)) this.checks.delete(k);
     for (const [k, c] of wanted) {
       const existing = this.checks.get(k);
@@ -197,17 +231,15 @@ export class Scheduler {
   private retention(): void {
     try {
       const n = this.world.repo.prune(this.cfg.retention);
-      this.log('retention prune', n);
+      const day = 86400_000;
+      const m = this.world.repo.hosts.pruneMetrics(new Date(Date.now() - this.cfg.retention.metricRawDays * day).toISOString(), new Date(Date.now() - this.cfg.retention.metricHourlyDays * day).toISOString());
+      this.log('retention prune', { ...n, metricsRaw: m.raw, metricsHourly: m.hourly });
     } catch (err) {
       this.log('retention failed', { error: redactError(err) });
     }
   }
 
-  dockerFor(entityId: string): { adapter: DockerAdapter; containerId: string } | null {
-    for (const d of this.docker.values()) {
-      const cid = d.containerFor(entityId);
-      if (cid) return { adapter: d, containerId: cid };
-    }
-    return null;
+  dockerFor(entityId: string) {
+    return this.hosts.dockerFor(entityId);
   }
 }

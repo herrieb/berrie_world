@@ -4,8 +4,8 @@ import type {
 } from '@berrie/shared';
 import { ROLE_RANK, effectiveHealth } from '@berrie/shared';
 
-export type View = 'home' | 'world' | 'services' | 'events' | 'alerts' | 'settings' | 'account' | 'people';
-export const VIEWS: View[] = ['home', 'world', 'services', 'events', 'alerts', 'settings', 'account', 'people'];
+export type View = 'home' | 'world' | 'services' | 'events' | 'alerts' | 'settings' | 'account' | 'people' | 'harbor';
+export const VIEWS: View[] = ['home', 'world', 'services', 'events', 'alerts', 'settings', 'account', 'people', 'harbor'];
 export type Daylight = 'auto' | 'day' | 'night';
 
 export interface Filters {

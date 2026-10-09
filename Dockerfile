@@ -9,7 +9,7 @@ RUN npm ci --no-audit --no-fund
 COPY shared shared
 COPY server server
 COPY web web
-RUN npm run build && npm test
+RUN npm run build && npm test && npm run smoke -w @berrie/server
 
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app

@@ -308,3 +308,64 @@ export interface UserTask {
 }
 
 export const DEFAULT_NOTIFICATIONS: NotificationPrefs = { inApp: true, browser: false, minSeverity: 'warning', favoritesOnly: false };
+
+// ---------------------------------------------------------------- servers, facts and metrics
+
+/**
+ * Collection status of a piece of information. Never shown as a value when not 'confirmed'/'stale':
+ * - confirmed: measured within the expected interval
+ * - stale: measured, but longer ago than expected (shown with its age)
+ * - unavailable: a collector tried and failed (permission, command missing, connection error)
+ * - unconfigured: no adapter for this host collects it
+ * - unknown: should be collected but no result yet
+ */
+export type FactStatus = 'confirmed' | 'stale' | 'unavailable' | 'unconfigured' | 'unknown';
+
+export interface Fact<T> { status: FactStatus; value: T | null; ts: string | null; source: string | null; error?: string | null }
+
+export interface HostFacts {
+  identity: Fact<{ hostname: string }>;
+  os: Fact<{ name: string; version: string | null; kernel: string | null; arch: string | null }>;
+  cpu: Fact<{ cores: number; model: string | null; usagePct: number | null }>;
+  memory: Fact<{ totalBytes: number; usedBytes: number | null; usedPct: number | null; swapTotalBytes: number | null; swapUsedBytes: number | null }>;
+  storage: Fact<{ filesystems: { mount: string; fstype: string; sizeBytes: number; usedBytes: number; usedPct: number }[] }>;
+  network: Fact<{ interfaces: { name: string; rxBps: number | null; txBps: number | null }[] }>;
+  uptime: Fact<{ seconds: number; load1: number; load5: number; load15: number }>;
+  containers: Fact<{ running: number; stopped: number; total: number }>;
+}
+export type FactCategory = keyof HostFacts;
+export const FACT_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'storage', 'network', 'uptime', 'containers'];
+export const FACT_LABEL: Record<FactCategory, string> = {
+  identity: 'Hostname', os: 'Operating system', cpu: 'CPU', memory: 'Memory', storage: 'Storage', network: 'Network', uptime: 'Uptime & load', containers: 'Containers',
+};
+
+export type DiscoveryMethod = 'ssh' | 'agent' | 'docker' | 'manual';
+export type Biome = 'meadow' | 'autumn' | 'snow' | 'desert' | 'tropical';
+export const BIOMES: Biome[] = ['meadow', 'autumn', 'snow', 'desert', 'tropical'];
+
+/** A server as shown in Server Harbor. Secrets are never included. */
+export interface HostRegistration {
+  id: string;
+  entityId: string;
+  name: string;
+  tags: string[];
+  method: DiscoveryMethod;
+  /** 'config' = defined in the config file (read-only in Harbor). */
+  source: 'harbor' | 'config';
+  settings: {
+    address?: string; port?: number; username?: string; authMethod?: 'key' | 'password';
+    docker?: 'none' | 'socket' | 'tcp'; dockerSocket?: string; dockerTcpPort?: number; dockerUrl?: string;
+    intervalSeconds?: number; probe?: boolean; description?: string;
+  };
+  status: 'active' | 'suspended' | 'archived';
+  hostKeyFingerprint: string | null;
+  hasCredential: boolean;
+  agentConfigured: boolean;
+  appearance: { biome?: Biome };
+  createdAt: string | null;
+  archivedAt: string | null;
+  lastContactAt: string | null;
+  lastError: string | null;
+}
+
+export interface MetricSeries { metric: string; source: string | null; resolution: 'raw' | 'hourly'; points: { ts: string; value: number; min?: number; max?: number }[] }

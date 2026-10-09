@@ -6,6 +6,9 @@ import { api, ApiError, toggleFavorite } from '../state/api';
 import { Icon } from './Icon';
 import { HEALTH_COLOR, TYPE_LABEL, fmtBytes, fmtTime, iconSvg, statusText, timeAgo } from './status';
 import { describeEvent, eventColor } from './events';
+import { HostFactsPanel } from './HostFactsPanel';
+import { MetricChart } from './MetricChart';
+import { fmtDuration, hostFacts, known } from './facts';
 
 interface Detail {
   entity: EntityView;
@@ -132,11 +135,11 @@ export function Inspector({ entity: e, onClose }: { entity: EntityView; onClose:
               <div className="callout gray"><b>Health unknown</b><p>{e.healthReason ?? 'No check has produced a result yet.'}{e.lastKnownHealth ? ` Last known: ${HEALTH_LABEL[e.lastKnownHealth]}.` : ''}</p></div>
             )}
 
-            <div className="tiles">
+            {e.kind === 'host' ? <HostTiles e={e} offset={offset} /> : <div className="tiles">
               <div className="tile"><span>Uptime</span><b>{runtime?.details?.startedAt && meta.state === 'running' ? since(runtime.details.startedAt) : meta.state && meta.state !== 'running' ? String(meta.state) : '—'}</b><small>{runtime?.available ? 'live' : meta.containerId == null ? 'not a container' : runtime?.reason ? 'unavailable' : e.lifecycle !== 'removed' ? 'loading…' : 'n/a'}</small></div>
               <div className="tile"><span>CPU / Memory</span><b>{runtime?.metrics ? `${runtime.metrics.cpuPercent ?? '—'}%` : '—'}</b><small>{runtime?.metrics ? `${fmtBytes(runtime.metrics.memBytes)} · live` : 'no live metrics'}</small></div>
               <div className="tile"><span>Last check</span><b>{timeAgo(e.lastCheckAt, offset)}</b><small>{e.inventoryUncertain ? 'inventory uncertain' : 'state change ' + timeAgo(e.lastChangeAt, offset)}</small></div>
-            </div>
+            </div>}
 
             <dl className="facts">
               <dt>Lifecycle</dt><dd>{LIFECYCLE_LABEL[e.lifecycle]}</dd>
@@ -150,12 +153,15 @@ export function Inspector({ entity: e, onClose }: { entity: EntityView; onClose:
               {meta.image != null && <><dt>Image</dt><dd><code>{String(meta.image)}</code></dd></>}
               {Array.isArray(meta.ports) && meta.ports.length > 0 && <><dt>Ports</dt><dd>{(meta.ports as string[]).join(', ')}</dd></>}
               {Array.isArray(meta.networks) && meta.networks.length > 0 && <><dt>Networks</dt><dd>{(meta.networks as string[]).join(', ')}</dd></>}
-              {e.kind === 'host' && meta.os != null && <><dt>System</dt><dd>{String(meta.os)} · {String(meta.cpus)} CPU · {fmtBytes(meta.memTotal as number)}</dd></>}
+              {e.kind === 'host' && meta.method != null && <><dt>Discovery</dt><dd>{String(meta.method)}{meta.source === 'config' ? ' (config file)' : ' (Server Harbor)'}{meta.monitoring === 'suspended' ? ' · monitoring suspended' : ''}</dd></>}
+              {e.kind === 'host' && Array.isArray(meta.tags) && (meta.tags as string[]).length > 0 && <><dt>Tags</dt><dd>{(meta.tags as string[]).join(', ')}</dd></>}
               {e.kind === 'host' && meta.dockerVersion != null && <><dt>Docker</dt><dd>{String(meta.dockerVersion)} · {String(meta.containersRunning)} running / {String(meta.containersStopped)} stopped</dd></>}
               <dt>First seen</dt><dd>{new Date(e.firstSeenAt).toLocaleString()}</dd>
               <dt>Last seen</dt><dd>{timeAgo(e.lastSeenAt, offset)}</dd>
               {meta.via != null && <><dt>Source</dt><dd>{String(meta.via)}</dd></>}
             </dl>
+
+            {e.kind === 'host' && <HostFactsPanel e={e} offset={offset} />}
 
             {hostnames.length > 0 && (
               <section>
@@ -225,6 +231,20 @@ export function Inspector({ entity: e, onClose }: { entity: EntityView; onClose:
   );
 }
 
+/** Host tiles: only collected values; otherwise the collection status is shown instead of a number. */
+function HostTiles({ e, offset }: { e: EntityView; offset: number }) {
+  const f = hostFacts(e);
+  const up = known(f?.uptime), cpu = known(f?.cpu), mem = known(f?.memory);
+  const status = (x: { status: string } | undefined) => (x ? (x.status === 'unconfigured' ? 'not collected' : x.status) : 'not collected');
+  return (
+    <div className="tiles">
+      <div className="tile"><span>Uptime</span><b>{up ? fmtDuration(up.seconds) : '—'}</b><small>{up ? `load ${up.load1}` : status(f?.uptime)}</small></div>
+      <div className="tile"><span>CPU / Memory</span><b>{cpu?.usagePct != null ? `${Math.round(cpu.usagePct)}%` : '—'}{mem?.usedPct != null ? ` · ${Math.round(mem.usedPct)}%` : ''}</b><small>{cpu ? `${cpu.cores} cores` : status(f?.cpu)}{mem ? ` · ${fmtBytes(mem.totalBytes)}` : ''}</small></div>
+      <div className="tile"><span>Last contact</span><b>{timeAgo(f?.os.ts ?? e.lastCheckAt, offset)}</b><small>{e.inventoryUncertain ? 'inventory uncertain' : 'state change ' + timeAgo(e.lastChangeAt, offset)}</small></div>
+    </div>
+  );
+}
+
 function since(iso: string): string {
   const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
   if (s < 3600) return `${Math.floor(s / 60)}m`;
@@ -246,6 +266,12 @@ function MetricsTab({ e, runtime, detail }: { e: EntityView; runtime: Runtime | 
   const maxLat = Math.max(50, ...checks.map((c) => c.latency_ms ?? 0));
   return (
     <>
+      {e.kind !== 'service' && (
+        <section>
+          <h4>History</h4>
+          <MetricChart entityId={e.id} />
+        </section>
+      )}
       <section>
         <h4>Live container metrics</h4>
         {e.kind !== 'service' ? <p className="muted">Not a container.</p> : !runtime ? <p className="muted">Loading…</p> : !runtime.available ? <p className="muted">Unavailable: {runtime.reason}</p> : (

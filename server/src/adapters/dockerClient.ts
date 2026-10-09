@@ -1,11 +1,26 @@
 import http from 'node:http';
 import https from 'node:https';
+import type { Duplex } from 'node:stream';
 
-/** Minimal Docker Engine API client over a unix socket or a (read-only) socket proxy URL. */
+export interface DockerTarget {
+  socketPath?: string;
+  url?: string;
+  /** Custom stream factory, e.g. a socket forwarded over SSH. */
+  connect?: () => Promise<Duplex>;
+}
+
+/** Minimal Docker Engine API client over a unix socket, a (read-only) socket proxy URL, or a forwarded stream. */
 export class DockerClient {
-  constructor(private readonly target: { socketPath?: string; url?: string }, private readonly timeoutMs = 8000) {}
+  constructor(private readonly target: DockerTarget, private readonly timeoutMs = 8000) {}
 
   private opts(path: string, method: string): http.RequestOptions & { protocol?: string } {
+    if (this.target.connect) {
+      const connect = this.target.connect;
+      return {
+        path, method,
+        createConnection: ((_o: unknown, cb: (err: Error | null, s?: Duplex) => void) => { connect().then((s) => cb(null, s), (e: Error) => cb(e)); return undefined; }) as unknown as http.RequestOptions['createConnection'],
+      };
+    }
     if (this.target.url) {
       const u = new URL(path, this.target.url);
       return { protocol: u.protocol, hostname: u.hostname, port: u.port, path: u.pathname + u.search, method };

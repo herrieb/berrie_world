@@ -12,6 +12,7 @@ import { AuthGate } from './ui/AuthGate';
 import { HomeView } from './ui/HomeView';
 import { AccountView } from './ui/AccountView';
 import { PeopleView } from './ui/PeopleView';
+import { HarborView } from './ui/HarborView';
 import { Avatar } from './ui/Avatar';
 
 const TABS: { id: View; label: string; icon: string; admin?: boolean }[] = [
@@ -20,6 +21,7 @@ const TABS: { id: View; label: string; icon: string; admin?: boolean }[] = [
   { id: 'services', label: 'Services', icon: 'list' },
   { id: 'events', label: 'Events', icon: 'activity' },
   { id: 'alerts', label: 'Alerts', icon: 'alert' },
+  { id: 'harbor', label: 'Harbor', icon: 'anchor', admin: true },
   { id: 'people', label: 'People', icon: 'users', admin: true },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
@@ -131,6 +133,7 @@ export function App() {
         {view === 'home' && <HomeView alerts={alerts} />}
         {view === 'account' && <AccountView />}
         {view === 'people' && isAdmin && <PeopleView />}
+        {view === 'harbor' && isAdmin && <HarborView />}
       </main>
     </div>
   );

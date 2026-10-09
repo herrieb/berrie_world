@@ -157,8 +157,12 @@ function house(seed: number, roofOverride?: RGB, wallOverride?: RGB): SpriteArt 
   return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [top[0], top[1] - 4] };
 }
 
-function server(seed: number): SpriteArt {
-  const h = 46;
+/**
+ * Server tower. `tier` reflects *confirmed* CPU capacity (1: ≤4 cores, 2: ≤16, 3: more); null = capacity not collected,
+ * drawn as a neutral standard tower so the picture never implies a measurement that does not exist.
+ */
+function server(seed: number, tier: number | null = null): SpriteArt {
+  const h = tier === 1 ? 32 : tier === 3 ? 62 : tier === 2 ? 50 : 42;
   const px = canvasFor(3, 3, h + 34);
   shadowPad(px, 3, 3);
   const body = hex(0x27324d);
@@ -412,9 +416,9 @@ function shop(seed: number): SpriteArt {
   return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [top[0], top[1]] };
 }
 
-export function buildingArt(type: BuildingType, seed: number): SpriteArt {
+export function buildingArt(type: BuildingType, seed: number, opts: { tier?: number | null } = {}): SpriteArt {
   switch (type) {
-    case 'server': return server(seed);
+    case 'server': return server(seed, opts.tier ?? null);
     case 'lab': return lab(seed);
     case 'workshop': return workshop(seed);
     case 'silo': return silo(seed);
@@ -626,9 +630,9 @@ export function glowCanvas(color: string, size = 64): HTMLCanvasElement {
 }
 
 /** Floating marker sign: '!' warning, '?' unknown/missing, '✓' recovery. */
-export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline'): HTMLCanvasElement {
+export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline' | 'pressure'): HTMLCanvasElement {
   const px = new Px(13, 17);
-  const bg = kind === 'warn' ? hex(0xef4b4b) : kind === 'ok' ? hex(0x3fd17a) : kind === 'offline' ? hex(0xa58bff) : hex(0x8a94a6);
+  const bg = kind === 'warn' ? hex(0xef4b4b) : kind === 'ok' ? hex(0x3fd17a) : kind === 'offline' ? hex(0xa58bff) : kind === 'pressure' ? hex(0xf08a3c) : hex(0x8a94a6);
   for (let y = 0; y < 13; y++) for (let x = 0; x < 13; x++) {
     if (Math.abs(x - 6) + Math.abs(y - 6) <= 6) px.set(x, y, Math.abs(x - 6) + Math.abs(y - 6) === 6 ? shade(bg, 0.6) : bg);
   }
@@ -636,6 +640,7 @@ export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline'): HTMLCanv
   if (kind === 'warn') { px.rect(6, 3, 1, 5, W); px.rect(6, 9, 1, 1, W); }
   else if (kind === 'missing') { px.rect(5, 3, 3, 1, W); px.rect(8, 4, 1, 2, W); px.rect(6, 6, 2, 1, W); px.rect(6, 7, 1, 1, W); px.rect(6, 9, 1, 1, W); }
   else if (kind === 'ok') { px.set(4, 6, W); px.set(5, 7, W); px.set(6, 8, W); px.set(7, 7, W); px.set(8, 6, W); px.set(9, 5, W); }
+  else if (kind === 'pressure') { px.rect(4, 8, 1, 2, W); px.rect(6, 6, 1, 4, W); px.rect(8, 3, 1, 7, W); } // rising bars: resource pressure
   else { px.rect(4, 5, 5, 1, W); px.rect(4, 7, 5, 1, W); }
   px.rect(6, 13, 1, 4, hex(0x3a3f4c));
   return px.done();

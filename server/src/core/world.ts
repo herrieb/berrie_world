@@ -79,7 +79,7 @@ export class World {
   private blocksDirty = false;
   private uncertainScopes = new Set<string>();
   /** Per-host signals used to derive host health. */
-  private hostSignals = new Map<string, { probe: Health | null; docker: 'ok' | 'fail' | null; dockerError: string | null }>();
+  private hostSignals = new Map<string, { probe: Health | null; docker: 'ok' | 'fail' | null; dockerError: string | null; collector: 'ok' | 'fail' | null; collectorError: string | null }>();
 
   constructor(readonly repo: Repo, readonly opts: WorldOptions) {}
 
@@ -324,21 +324,67 @@ export class World {
 
   // ---------------- host health ----------------
 
-  setHostSignal(hostId: string, signal: { probe?: Health | null; docker?: 'ok' | 'fail'; dockerError?: string | null }): void {
-    const s = this.hostSignals.get(hostId) ?? { probe: null, docker: null, dockerError: null };
+  setHostSignal(hostId: string, signal: { probe?: Health | null; docker?: 'ok' | 'fail'; dockerError?: string | null; collector?: 'ok' | 'fail'; collectorError?: string | null }): void {
+    const s = this.hostSignals.get(hostId) ?? { probe: null, docker: null, dockerError: null, collector: null, collectorError: null };
     Object.assign(s, signal);
     this.hostSignals.set(hostId, s);
     if (!this.repo.getEntity(hostId)) return;
     let health: Health;
     let reason: string;
-    if (s.probe === 'host_offline') { health = 'host_offline'; reason = 'host reachability probe failing'; }
-    else if (s.docker === 'fail') {
+    if (s.probe === 'host_offline') { health = 'host_offline'; reason = 'host unreachable (repeated connection failures)'; }
+    else if (s.collector === 'fail') {
+      // Reachable but we cannot collect (auth, permissions), or an agent went silent: never "offline" on that basis.
+      const reachable = s.probe === 'healthy' || s.docker === 'ok';
+      health = reachable ? 'degraded' : 'unknown';
+      reason = reachable ? `host reachable, collection failing: ${s.collectorError}` : s.collectorError ?? 'collection failing';
+    } else if (s.docker === 'fail') {
       health = s.probe === 'healthy' ? 'degraded' : 'unknown';
       reason = s.probe === 'healthy' ? `host reachable, Docker API unavailable: ${s.dockerError}` : `Docker API unavailable: ${s.dockerError}`;
     } else if (s.docker === 'ok' || s.probe === 'healthy') { health = 'healthy'; reason = s.docker === 'ok' ? 'Docker API reachable' : 'host reachable'; }
+    else if (s.collector === 'ok') { health = 'healthy'; reason = 'collector reporting'; }
     else { health = 'unknown'; reason = 'no signal yet'; }
     this.applyHealth(hostId, health, reason, 'host');
     this.flush();
+  }
+
+  /** Mark a host's monitoring as suspended: its state becomes unknown (we stopped looking), nothing is removed. */
+  suspendHost(hostId: string, by: string): void {
+    this.hostSignals.delete(hostId);
+    for (const e of this.repo.listEntities().filter((x) => x.hostId === hostId && x.lifecycle !== 'removed')) {
+      this.applyHealth(e.id, 'unknown', `monitoring suspended by ${by}`, 'harbor', { factual: true });
+    }
+    this.flush();
+  }
+
+  /** Merge fields into an entity's metadata (e.g. freshly collected facts) and push the change. */
+  patchMeta(id: string, patch: Record<string, unknown>): void {
+    const e = this.repo.getEntity(id);
+    if (!e) return;
+    this.repo.updateEntity(id, { meta: { ...e.meta, ...patch } });
+    this.dirty.add(id);
+    this.flush();
+  }
+
+  /**
+   * Explicit, confirmed removal of a whole server by an administrator (Server Harbor). This is the positive evidence
+   * the lifecycle rules require; history stays in the archive.
+   */
+  archiveHost(hostId: string, by: string): number {
+    const now = this.repo.now();
+    let n = 0;
+    this.repo.tx(() => {
+      for (const e of this.repo.listEntities().filter((x) => x.hostId === hostId || x.id === hostId)) {
+        this.repo.updateEntity(e.id, { lifecycle: 'archived', removedAt: e.removedAt ?? now, archivedAt: now });
+        this.repo.deleteLayout(e.id);
+        this.dirty.add(e.id);
+        n++;
+      }
+      this.repo.releaseEmptyBlocks((district) => district === hostId);
+      this.blocksDirty = true;
+      this.emit({ type: 'service.archived', entityId: hostId, source: by, severity: 'notice', details: { name: hostId, reason: 'server archived in Server Harbor', entities: n, by } });
+    });
+    this.flush();
+    return n;
   }
 
   // ---------------- layout ----------------

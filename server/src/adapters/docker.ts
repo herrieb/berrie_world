@@ -84,7 +84,7 @@ export class DockerAdapter {
   readonly containers = new Map<string, { entityId: string; name: string; protected: boolean }>();
   hostInfo: Record<string, unknown> = {};
 
-  constructor(readonly host: HostConfig, client?: DockerClient) {
+  constructor(readonly host: Pick<HostConfig, 'id' | 'name' | 'docker'>, client?: DockerClient) {
     this.client = client ?? new DockerClient(host.docker ?? {});
   }
 
@@ -104,9 +104,9 @@ export class DockerAdapter {
     try {
       const info = await this.client.get<Record<string, unknown>>('/info');
       this.hostInfo = {
-        hostname: info.Name, os: info.OperatingSystem, kernel: info.KernelVersion, cpus: info.NCPU,
+        hostname: info.Name, os: info.OperatingSystem, kernel: info.KernelVersion, arch: info.Architecture, cpus: info.NCPU,
         memTotal: info.MemTotal, dockerVersion: info.ServerVersion, containersRunning: info.ContainersRunning,
-        containersStopped: info.ContainersStopped,
+        containersStopped: info.ContainersStopped, containers: info.Containers, infoAt: new Date().toISOString(),
       };
     } catch { /* host info is optional */ }
 

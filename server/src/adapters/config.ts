@@ -10,12 +10,13 @@ import { classify, isBuildingType } from './classify.js';
 import { hostEntityId } from './docker.js';
 
 /** Hosts and manually configured services. The config file is always a complete inventory of itself. */
-export function configInventory(cfg: AppConfig, hostMeta: Map<string, Record<string, unknown>>): InventoryResult {
+export function configInventory(cfg: AppConfig, hosts: Map<string, { name: string; meta: Record<string, unknown> }> = new Map()): InventoryResult {
   const entities: ObservedEntity[] = [];
   for (const h of cfg.hosts) {
+    const d = hosts.get(h.id);
     entities.push({
-      id: hostEntityId(h.id), kind: 'host', name: h.name, buildingType: 'server', parentId: null, hostId: hostEntityId(h.id),
-      meta: { configuredId: h.id, docker: h.docker?.url ? 'proxy' : h.docker?.socketPath ? 'socket' : 'none', ...(hostMeta.get(h.id) ?? {}) },
+      id: hostEntityId(h.id), kind: 'host', name: d?.name ?? h.name, buildingType: 'server', parentId: null, hostId: hostEntityId(h.id),
+      meta: { configuredId: h.id, docker: h.docker?.url ? 'proxy' : h.docker?.socketPath ? 'socket' : 'none', ...(d?.meta ?? {}) },
     });
   }
   for (const s of cfg.services) {

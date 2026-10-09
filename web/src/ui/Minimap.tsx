@@ -16,14 +16,15 @@ export function Minimap({ renderer, tick, entitiesKey }: { renderer: WorldRender
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = '#163f5e';
     ctx.fillRect(0, 0, W, H);
-    if (!terrain) return;
-    const tw = terrain.canvas.width, th = terrain.canvas.height;
+    if (!terrain || !terrain.islands.length) return;
+    const tw = terrain.width, th = terrain.height;
     const scale = Math.min(W / tw, H / th);
     const ox = (W - tw * scale) / 2, oy = (H - th * scale) / 2;
     geo.current = { scale, ox: ox - terrain.offsetX * scale, oy: oy - terrain.offsetY * scale };
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(terrain.canvas, ox, oy, tw * scale, th * scale);
     const g = geo.current;
+    // One canvas per island, placed at its world position.
+    for (const t of terrain.islands) ctx.drawImage(t.canvas, g.ox + t.offsetX * scale, g.oy + t.offsetY * scale, t.canvas.width * scale, t.canvas.height * scale);
     for (const n of nodes) {
       const cx = ((n.rect.x + n.rect.w / 2) - (n.rect.y + n.rect.h / 2)) * (TW / 2);
       const cy = ((n.rect.x + n.rect.w / 2) + (n.rect.y + n.rect.h / 2)) * (TH / 2);
