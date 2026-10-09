@@ -33,6 +33,10 @@ interface State {
   editLayout: boolean;
   admin: boolean;
   adminConfigured: boolean;
+  /** Server requires admin sign-in to view the world (REQUIRE_AUTH_FOR_VIEW). */
+  viewRequiresAuth: boolean;
+  /** True once /api/auth/me has answered. */
+  authKnown: boolean;
   /** Increment to ask the renderer to fly to the selected building. */
   focusTick: number;
   apply: (m: ServerMessage) => void;
@@ -41,7 +45,7 @@ interface State {
   setFilters: (f: Partial<Filters>) => void;
   setDaylight: (d: Daylight) => void;
   setEditLayout: (b: boolean) => void;
-  setAuth: (a: { admin: boolean; adminConfigured: boolean; actionsEnabled?: boolean }) => void;
+  setAuth: (a: { admin: boolean; adminConfigured: boolean; actionsEnabled?: boolean; viewRequiresAuth?: boolean }) => void;
   setWs: (s: State['ws']) => void;
 }
 
@@ -69,6 +73,8 @@ export const useStore = create<State>((set) => ({
   editLayout: false,
   admin: false,
   adminConfigured: false,
+  viewRequiresAuth: false,
+  authKnown: false,
   focusTick: 0,
   apply: (m) => set((s) => {
     switch (m.t) {
@@ -107,7 +113,10 @@ export const useStore = create<State>((set) => ({
   setFilters: (f) => set((s) => ({ filters: { ...s.filters, ...f } })),
   setDaylight: (daylight) => { savePref('daylight', daylight); set({ daylight }); },
   setEditLayout: (editLayout) => set({ editLayout }),
-  setAuth: (a) => set((s) => ({ admin: a.admin, adminConfigured: a.adminConfigured, actionsEnabled: a.actionsEnabled ?? s.actionsEnabled })),
+  setAuth: (a) => set((s) => ({
+    admin: a.admin, adminConfigured: a.adminConfigured, actionsEnabled: a.actionsEnabled ?? s.actionsEnabled,
+    viewRequiresAuth: a.viewRequiresAuth ?? s.viewRequiresAuth, authKnown: true,
+  })),
   setWs: (ws) => set({ ws }),
 }));
 

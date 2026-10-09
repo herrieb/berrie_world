@@ -20,7 +20,7 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
 
 export async function refreshAuth(): Promise<void> {
   try {
-    const me = await api<{ admin: boolean; adminConfigured: boolean; actionsEnabled: boolean }>('/api/auth/me');
+    const me = await api<{ admin: boolean; adminConfigured: boolean; actionsEnabled: boolean; viewRequiresAuth?: boolean }>('/api/auth/me');
     useStore.getState().setAuth(me);
   } catch { /* server unreachable; ws state shows this */ }
 }
@@ -50,9 +50,11 @@ export function connectWs(): () => void {
         for (const l of listeners) l(m);
       } catch { /* ignore malformed */ }
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       useStore.getState().setWs('closed');
       if (stopped) return;
+      // 4401: sign-in required to view. Don't retry; the app reconnects after login.
+      if (ev.code === 4401) { void refreshAuth(); return; }
       timer = window.setTimeout(open, backoff);
       backoff = Math.min(backoff * 2, 30_000);
     };

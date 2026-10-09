@@ -73,7 +73,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
   });
 
   // ---------- auth ----------
-  app.get('/api/auth/me', async (req) => ({ admin: auth.isAdmin(req), adminConfigured: auth.adminConfigured, actionsEnabled: cfg.actionsEnabled && auth.adminConfigured }));
+  app.get('/api/auth/me', async (req) => ({ admin: auth.isAdmin(req), adminConfigured: auth.adminConfigured, actionsEnabled: cfg.actionsEnabled && auth.adminConfigured, viewRequiresAuth: cfg.requireAuthForView }));
   app.post('/api/auth/login', {
     schema: { body: { type: 'object', required: ['token'], properties: { token: { type: 'string', maxLength: 512 } }, additionalProperties: false } },
   }, async (req, reply) => {

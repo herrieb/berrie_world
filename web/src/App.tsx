@@ -8,6 +8,7 @@ import { EventsView } from './ui/EventsView';
 import { AlertsView } from './ui/AlertsView';
 import { SettingsView } from './ui/SettingsView';
 import { Icon } from './ui/Icon';
+import { LoginGate } from './ui/LoginGate';
 
 const TABS: { id: View; label: string; icon: string }[] = [
   { id: 'world', label: 'World', icon: 'globe' },
@@ -29,7 +30,13 @@ export function App() {
   const daylight = useStore((s) => s.daylight);
   const setDaylight = useStore((s) => s.setDaylight);
 
-  useEffect(() => { void refreshAuth(); return connectWs(); }, []);
+  const admin = useStore((s) => s.admin);
+  const authKnown = useStore((s) => s.authKnown);
+  const viewRequiresAuth = useStore((s) => s.viewRequiresAuth);
+  const gated = authKnown && viewRequiresAuth && !admin;
+  useEffect(() => { void refreshAuth(); }, []);
+  // (Re)connect whenever the sign-in state changes, so the world loads right after login.
+  useEffect(() => (authKnown && !gated ? connectWs() : undefined), [authKnown, gated, admin]);
 
   // Deep links: #/e/<entity id> selects and focuses a building.
   const selectedId = useStore((s) => s.selectedId);
@@ -65,6 +72,8 @@ export function App() {
 
   const [now, setNow] = useState(new Date());
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 15_000); return () => clearInterval(t); }, []);
+
+  if (gated) return <LoginGate />;
 
   return (
     <div className="app">

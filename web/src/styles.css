@@ -236,3 +236,11 @@ pre.logs { background: #060c18; border: 1px solid var(--line); border-radius: 8p
   .sidepanel { width: 100%; top: auto; height: 55%; padding: 8px; }
   .settings .grid2 { grid-template-columns: 1fr; }
 }
+
+/* Sign-in gate (REQUIRE_AUTH_FOR_VIEW) */
+.gate { min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--text); }
+.gate-card { width: min(360px, 100%); display: flex; flex-direction: column; gap: 12px; align-items: stretch; text-align: center; background: var(--panel-solid); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 28px 24px; }
+.gate-card svg { align-self: center; }
+.gate-card h1 { margin: 0; font-size: 22px; }
+.gate-card p { margin: 0; }
+.gate-card button { justify-content: center; }
