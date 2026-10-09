@@ -189,6 +189,7 @@ export class HostManager {
     return {
       source: h.source, method: h.method, tags: h.tags, appearance: h.appearance, monitoring: h.status,
       ...(d ? d.hostInfo : {}), facts: this.facts(h.id),
+      ...(this.extras.has(h.id) ? { signals: { cloudflared: this.extras.get(h.id)!.cloudflared, tunnelRoutes: this.extras.get(h.id)!.tunnelIngress?.length ?? null, signalsAt: this.extras.get(h.id)!.ts } } : {}),
     };
   }
 
