@@ -15,6 +15,8 @@ export interface RendererCallbacks {
   onSelect: (id: string | null) => void;
   onMove: (id: string, x: number, y: number) => void;
   onCamera?: () => void;
+  /** Fired ~1.5 s after the user stops moving the camera. */
+  onCameraSettled?: (camera: { x: number; y: number; zoom: number }) => void;
 }
 
 export interface RenderState {
@@ -25,6 +27,9 @@ export interface RenderState {
   matching: Set<string> | null;
   daylight: 'auto' | 'day' | 'night';
   editLayout: boolean;
+  labelDensity?: 'less' | 'auto' | 'more';
+  /** Personal saved camera, used instead of fitting the whole world on first load. */
+  initialCamera?: { x: number; y: number; zoom: number } | null;
 }
 
 interface BuildingNode {
@@ -154,7 +159,10 @@ export class WorldRenderer {
     for (const [id, n] of this.nodes) if (!seen.has(id)) { n.root.destroy({ children: true }); n.label.remove(); this.nodes.delete(id); }
     this.drawRings();
     this.placeLabels();
-    if (!this.fitted && this.terrain) { this.fitted = true; this.fit(); }
+    if (!this.fitted && this.terrain) {
+      this.fitted = true;
+      if (s.initialCamera) { this.cam = { ...s.initialCamera }; this.applyCamera(); } else this.fit();
+    }
   }
 
   private rebuildTerrain(blocks: BlockView[], rects: Rect[]): void {
@@ -317,7 +325,9 @@ export class WorldRenderer {
       const problem = PROBLEM.includes(n.health) || e.lifecycle === 'missing' || n.health === 'host_offline';
       const match = !this.state.matching || this.state.matching.has(e.id);
       // Zoom-level detail: far out only problems/selection keep labels; very far, labels become compact.
-      const show = match && (selected || problem || e.kind === 'host' || z >= 1.15 || this.nodes.size <= 12);
+      const density = this.state.labelDensity ?? 'auto';
+      const threshold = density === 'more' ? 0.75 : density === 'less' ? 1.9 : 1.15;
+      const show = match && (selected || problem || e.kind === 'host' || z >= threshold || this.nodes.size <= 12);
       const compact = z < 0.9 && !selected;
       const key = `${e.displayName}|${st.text}|${st.color}|${compact}|${selected}|${e.inventoryUncertain}|${e.buildingType}|${e.lifecycle}`;
       if (key !== n.labelKey) {
@@ -562,6 +572,20 @@ export class WorldRenderer {
     this.sea.tilePosition.set(this.world.x, this.world.y);
     this.placeLabels();
     this.cb.onCamera?.();
+    if (this.fitted && this.cb.onCameraSettled) {
+      window.clearTimeout(this.settleTimer);
+      this.settleTimer = window.setTimeout(() => this.cb.onCameraSettled?.(this.camera()), 1500);
+    }
+  }
+
+  private settleTimer: number | undefined;
+
+  camera(): { x: number; y: number; zoom: number } {
+    return { x: Math.round(this.cam.x), y: Math.round(this.cam.y), zoom: Math.round(this.cam.zoom * 100) / 100 };
+  }
+
+  setCamera(c: { x: number; y: number; zoom: number }): void {
+    this.camTarget = { ...c };
   }
 
   fit(): void {

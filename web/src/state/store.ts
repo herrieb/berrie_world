@@ -1,10 +1,11 @@
 import { create } from 'zustand';
 import type {
-  AdapterStatus, Alert, BlockView, BuildingType, EntityView, Health, HostnameHint, Origin, ServerMessage, Severity, WorldEvent,
+  AdapterStatus, Alert, BlockView, BuildingType, EntityView, Health, HostnameHint, Me, Origin, Role, SavedView, ServerMessage, Severity, UserPrefs, WorldEvent,
 } from '@berrie/shared';
-import { effectiveHealth } from '@berrie/shared';
+import { ROLE_RANK, effectiveHealth } from '@berrie/shared';
 
-export type View = 'world' | 'services' | 'events' | 'alerts' | 'settings';
+export type View = 'home' | 'world' | 'services' | 'events' | 'alerts' | 'settings' | 'account' | 'people';
+export const VIEWS: View[] = ['home', 'world', 'services', 'events', 'alerts', 'settings', 'account', 'people'];
 export type Daylight = 'auto' | 'day' | 'night';
 
 export interface Filters {
@@ -31,12 +32,12 @@ interface State {
   filters: Filters;
   daylight: Daylight;
   editLayout: boolean;
-  admin: boolean;
-  adminConfigured: boolean;
-  /** Server requires admin sign-in to view the world (REQUIRE_AUTH_FOR_VIEW). */
-  viewRequiresAuth: boolean;
-  /** True once /api/auth/me has answered. */
-  authKnown: boolean;
+  /** Result of /api/auth/me; null until it answered. */
+  me: Me | null;
+  /** Personal state (server-side, per user). */
+  prefs: UserPrefs;
+  favorites: string[];
+  savedViews: SavedView[];
   /** Increment to ask the renderer to fly to the selected building. */
   focusTick: number;
   apply: (m: ServerMessage) => void;
@@ -45,7 +46,8 @@ interface State {
   setFilters: (f: Partial<Filters>) => void;
   setDaylight: (d: Daylight) => void;
   setEditLayout: (b: boolean) => void;
-  setAuth: (a: { admin: boolean; adminConfigured: boolean; actionsEnabled?: boolean; viewRequiresAuth?: boolean }) => void;
+  setMe: (me: Me) => void;
+  setPersonal: (p: { prefs?: UserPrefs; favorites?: string[]; savedViews?: SavedView[] }) => void;
   setWs: (s: State['ws']) => void;
 }
 
@@ -67,14 +69,14 @@ export const useStore = create<State>((set) => ({
   events: [],
   serverOffsetMs: 0,
   selectedId: null,
-  view: ((): View => { try { const v = new URLSearchParams(location.search).get('view'); return (['world', 'services', 'events', 'alerts', 'settings'] as View[]).includes(v as View) ? (v as View) : 'world'; } catch { return 'world'; } })(),
+  view: ((): View => { try { const v = new URLSearchParams(location.search).get('view'); return VIEWS.includes(v as View) ? (v as View) : location.hash.startsWith('#/e/') ? 'world' : 'home'; } catch { return 'home'; } })(),
   filters: { text: '', health: 'all', type: 'all', host: 'all' },
   daylight: loadPref<Daylight>('daylight', 'auto'),
   editLayout: false,
-  admin: false,
-  adminConfigured: false,
-  viewRequiresAuth: false,
-  authKnown: false,
+  me: null,
+  prefs: {},
+  favorites: [],
+  savedViews: [],
   focusTick: 0,
   apply: (m) => set((s) => {
     switch (m.t) {
@@ -113,14 +115,21 @@ export const useStore = create<State>((set) => ({
   setFilters: (f) => set((s) => ({ filters: { ...s.filters, ...f } })),
   setDaylight: (daylight) => { savePref('daylight', daylight); set({ daylight }); },
   setEditLayout: (editLayout) => set({ editLayout }),
-  setAuth: (a) => set((s) => ({
-    admin: a.admin, adminConfigured: a.adminConfigured, actionsEnabled: a.actionsEnabled ?? s.actionsEnabled,
-    viewRequiresAuth: a.viewRequiresAuth ?? s.viewRequiresAuth, authKnown: true,
+  setMe: (me) => set({ me }),
+  setPersonal: (p) => set((s) => ({
+    prefs: p.prefs ?? s.prefs, favorites: p.favorites ?? s.favorites, savedViews: p.savedViews ?? s.savedViews,
+    daylight: p.prefs?.daylight ?? s.daylight,
   })),
   setWs: (ws) => set({ ws }),
 }));
 
 // ---------- derived helpers ----------
+
+/** UI convenience only: the server enforces every permission independently. */
+export function hasRole(me: Me | null, role: Role): boolean {
+  return !!me?.user && ROLE_RANK[me.user.role] >= ROLE_RANK[role];
+}
+export const useRole = (role: Role) => useStore((s) => hasRole(s.me, role));
 
 export const BAD: Health[] = ['degraded', 'unhealthy', 'unreachable', 'restarting', 'host_offline'];
 

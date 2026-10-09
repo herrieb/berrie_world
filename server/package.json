@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "DATA_DIR=${DATA_DIR:-../data} CONFIG_PATH=${CONFIG_PATH:-../config/berrie.config.json} tsx watch --clear-screen=false src/main.ts",
-    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/main.js --packages=external --alias:@berrie/shared=../shared/src/index.ts",
+    "build": "esbuild src/main.ts src/cli.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --packages=external --alias:@berrie/shared=../shared/src/index.ts",
     "start": "node dist/main.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

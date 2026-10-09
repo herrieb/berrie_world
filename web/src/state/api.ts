@@ -1,4 +1,4 @@
-import type { ServerMessage } from '@berrie/shared';
+import type { Me, SavedView, ServerMessage, UserPrefs } from '@berrie/shared';
 import { useStore } from './store';
 
 export class ApiError extends Error {
@@ -18,11 +18,52 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
   return body as T;
 }
 
-export async function refreshAuth(): Promise<void> {
+export async function refreshAuth(): Promise<Me | null> {
   try {
-    const me = await api<{ admin: boolean; adminConfigured: boolean; actionsEnabled: boolean; viewRequiresAuth?: boolean }>('/api/auth/me');
-    useStore.getState().setAuth(me);
-  } catch { /* server unreachable; ws state shows this */ }
+    const me = await api<Me>('/api/auth/me');
+    useStore.getState().setMe(me);
+    if (me.user) void loadPersonal();
+    return me;
+  } catch { return null; /* server unreachable; ws state shows this */ }
+}
+
+/** Personal state lives on the server so it follows the user across devices. */
+export async function loadPersonal(): Promise<void> {
+  try {
+    const [p, f, v] = await Promise.all([
+      api<{ prefs: UserPrefs }>('/api/account/prefs'),
+      api<{ favorites: string[] }>('/api/account/favorites'),
+      api<{ views: SavedView[] }>('/api/account/views'),
+    ]);
+    useStore.getState().setPersonal({ prefs: p.prefs, favorites: f.favorites, savedViews: v.views });
+  } catch { /* keep defaults */ }
+}
+
+let prefTimer: number | undefined;
+let pendingPrefs: UserPrefs = {};
+/** Merge into personal preferences locally now, persist (debounced) to the server. */
+export function savePrefs(patch: UserPrefs): void {
+  const st = useStore.getState();
+  st.setPersonal({ prefs: { ...st.prefs, ...patch } });
+  pendingPrefs = { ...pendingPrefs, ...patch };
+  window.clearTimeout(prefTimer);
+  prefTimer = window.setTimeout(() => {
+    const body = pendingPrefs;
+    pendingPrefs = {};
+    void api('/api/account/prefs', { method: 'PUT', json: body }).catch(() => undefined);
+  }, 800);
+}
+
+export async function toggleFavorite(id: string): Promise<void> {
+  const on = useStore.getState().favorites.includes(id);
+  const r = await api<{ favorites: string[] }>(`/api/account/favorites/${encodeURIComponent(id)}`, { method: on ? 'DELETE' : 'PUT' });
+  useStore.getState().setPersonal({ favorites: r.favorites });
+}
+
+export async function signOut(): Promise<void> {
+  await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+  location.hash = '';
+  location.reload();
 }
 
 type Listener = (m: ServerMessage) => void;

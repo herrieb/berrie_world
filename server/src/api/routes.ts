@@ -1,12 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { statSync } from 'node:fs';
-import type { EventType, ServerMessage, Severity, WorldSnapshot } from '@berrie/shared';
+import type { AdapterStatus, BlockView, EntityView, EventType, HostnameHint, ServerMessage, Severity, WorldEvent, WorldSnapshot } from '@berrie/shared';
 import type { AppConfig } from '../config.js';
 import type { World } from '../core/world.js';
 import type { Scheduler } from '../core/scheduler.js';
 import { redactError, sanitizeDetails } from '../core/redact.js';
 import { isBuildingType } from '../adapters/classify.js';
-import { Auth, RateLimiter } from './auth.js';
+import { type Auth, type Principal, RateLimiter } from './auth.js';
 
 const ACTIONS = ['start', 'stop', 'restart'] as const;
 type Action = (typeof ACTIONS)[number];
@@ -35,32 +35,64 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
   const runtimeCache = new Map<string, { at: number; data: unknown }>();
   const startedAt = Date.now();
 
-  const requireAdmin = async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!auth.isAdmin(req)) return reply.code(401).send({ error: 'authentication required' });
-  };
-  if (cfg.requireAuthForView) {
-    app.addHook('onRequest', async (req, reply) => {
-      const open = ['/api/auth/login', '/api/auth/me', '/api/health', '/api/ingest/events'];
-      if (req.url.startsWith('/api/') && !open.some((p) => req.url.startsWith(p)) && !auth.isAdmin(req)) {
-        return reply.code(401).send({ error: 'authentication required' });
-      }
-    });
-  }
+  const operator = auth.require('operator');
+  const admin = auth.require('admin');
+  const me = (req: FastifyRequest): Principal => auth.principal(req)!;
+  const actor = (req: FastifyRequest) => auth.actor(auth.principal(req));
 
-  const snapshot = (): WorldSnapshot => ({
-    mode: cfg.mode, entities: repo.views(), blocks: repo.blockViews(), adapters: repo.listAdapterStates(),
-    hints: scheduler.hints, recentEvents: repo.listEvents({ limit: 60 }), connected: repo.everConnected(),
-    actionsEnabled: cfg.actionsEnabled && auth.adminConfigured, serverTime: new Date().toISOString(),
+  // Every API route needs a signed-in user unless listed here. Role and per-server checks happen per route.
+  const PUBLIC = [
+    '/api/auth/me', '/api/auth/setup', '/api/auth/login', '/api/auth/mfa', '/api/auth/logout', '/api/auth/reset',
+    '/api/health', '/api/ingest/events', '/api/agent/',
+  ];
+  app.addHook('onRequest', async (req, reply) => {
+    const path = req.url.split('?')[0];
+    if (!path.startsWith('/api/')) return;
+    if (PUBLIC.some((p) => path === p || (p.endsWith('/') && path.startsWith(p)))) return;
+    if (/^\/api\/invitations\/[^/]+(\/accept)?$/.test(path) && (req.method === 'GET' || path.endsWith('/accept')) && !auth.principal(req)) return;
+    if (!auth.principal(req)) return reply.code(401).send({ error: 'authentication required' });
   });
 
-  const entityOr404 = (id: string, reply: FastifyReply) => {
+  // ---------- per-user visibility (server-side; the UI hiding things is not authorization) ----------
+  const entityVisible = (p: Principal | null, e: { hostId: string | null }) => auth.canSee(p, e);
+  const eventVisible = (p: Principal | null, ev: WorldEvent): boolean => {
+    if (ev.entityId) {
+      const e = repo.getEntity(ev.entityId);
+      return e ? entityVisible(p, e) : auth.hasRole(p, 'admin');
+    }
+    const scope = typeof ev.details.scope === 'string' ? ev.details.scope : null;
+    if (scope && repo.getEntity(`host:${scope}`)) return auth.canHost(p, `host:${scope}`);
+    return auth.seesAllHosts(p);
+  };
+  const adapterVisible = (p: Principal | null, a: AdapterStatus) =>
+    repo.getEntity(`host:${a.scope}`) ? auth.canHost(p, `host:${a.scope}`) : auth.seesAllHosts(p);
+  const blockVisible = (p: Principal | null, b: BlockView) => auth.canHost(p, b.district === 'external' ? null : b.district);
+  const hintVisible = (p: Principal | null, h: HostnameHint) => {
+    if (auth.seesAllHosts(p)) return true;
+    const e = h.entityId ? repo.getEntity(h.entityId) : undefined;
+    return !!e && entityVisible(p, e);
+  };
+  const viewsFor = (p: Principal | null): EntityView[] => repo.views().filter((v) => entityVisible(p, v));
+
+  const snapshot = (p: Principal | null): WorldSnapshot => ({
+    mode: cfg.mode, entities: viewsFor(p), blocks: repo.blockViews().filter((b) => blockVisible(p, b)),
+    adapters: repo.listAdapterStates().filter((a) => adapterVisible(p, a)),
+    hints: scheduler.hints.filter((h) => hintVisible(p, h)),
+    recentEvents: repo.listEvents({ limit: 120 }).filter((ev) => eventVisible(p, ev)).slice(0, 60),
+    connected: repo.everConnected(), actionsEnabled: cfg.actionsEnabled && auth.hasRole(p, 'operator'), serverTime: new Date().toISOString(),
+  });
+
+  /** 404 for entities that do not exist *or* that this user may not see (no existence oracle). */
+  const entityOr404 = (id: string, req: FastifyRequest, reply: FastifyReply) => {
     const e = repo.getEntity(id);
-    if (!e) { void reply.code(404).send({ error: 'unknown entity' }); return null; }
+    if (!e || !entityVisible(auth.principal(req), e)) { void reply.code(404).send({ error: 'unknown entity' }); return null; }
     return e;
   };
 
   // ---------- health / self-monitoring ----------
-  app.get('/api/health', async () => {
+  app.get('/api/health', async (req) => {
+    // Unauthenticated callers (container healthcheck, uptime monitors) only learn that the process is up.
+    if (!auth.principal(req)) return { ok: true, mode: cfg.mode };
     let dbBytes: number | null = null;
     try { dbBytes = statSync(cfg.dbPath).size + (statSync(`${cfg.dbPath}-wal`, { throwIfNoEntry: false })?.size ?? 0); } catch { /* in-memory */ }
     const mem = process.memoryUsage();
@@ -72,38 +104,24 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     };
   });
 
-  // ---------- auth ----------
-  app.get('/api/auth/me', async (req) => ({ admin: auth.isAdmin(req), adminConfigured: auth.adminConfigured, actionsEnabled: cfg.actionsEnabled && auth.adminConfigured, viewRequiresAuth: cfg.requireAuthForView }));
-  app.post('/api/auth/login', {
-    schema: { body: { type: 'object', required: ['token'], properties: { token: { type: 'string', maxLength: 512 } }, additionalProperties: false } },
-  }, async (req, reply) => {
-    if (!auth.loginLimiter.allow(`login:${req.ip}`)) return reply.code(429).send({ error: 'too many attempts, wait a minute' });
-    if (!auth.adminConfigured) return reply.code(400).send({ error: 'no ADMIN_TOKEN configured on the server' });
-    const ok = auth.checkToken((req.body as { token: string }).token);
-    repo.audit({ actor: 'anonymous', ip: req.ip, action: 'login', entityId: null, result: ok ? 'ok' : 'rejected' });
-    if (!ok) return reply.code(401).send({ error: 'invalid token' });
-    auth.issue(reply);
-    return { admin: true };
-  });
-  app.post('/api/auth/logout', async (_req, reply) => { auth.clear(reply); return { admin: false }; });
-
   // ---------- world ----------
-  app.get('/api/snapshot', async () => snapshot());
+  app.get('/api/snapshot', async (req) => snapshot(auth.principal(req)));
 
   app.get('/api/entities/:id', { schema: { params: ID_PARAM } }, async (req, reply) => {
-    const e = entityOr404((req.params as { id: string }).id, reply);
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
     if (!e) return;
+    const p = me(req);
     return {
       entity: repo.toView(e),
-      children: repo.children(e.id).map((c) => repo.toView(c)),
-      events: repo.listEvents({ entityId: e.id, limit: 40 }),
+      children: repo.children(e.id).filter((c) => entityVisible(p, c)).map((c) => repo.toView(c)),
+      events: repo.listEvents({ entityId: e.id, limit: 40 }).filter((ev) => eventVisible(p, ev)),
       checks: repo.checkHistory(e.id, 60),
-      actions: actionAvailability(e.id),
+      actions: actionAvailability(e.id, p),
     };
   });
 
   app.get('/api/entities/:id/runtime', { schema: { params: ID_PARAM } }, async (req, reply) => {
-    const e = entityOr404((req.params as { id: string }).id, reply);
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
     if (!e) return;
     const d = scheduler.dockerFor(e.id);
     if (!d) return { available: false, reason: e.kind === 'service' ? 'no running Docker container is mapped to this service' : 'not a container' };
@@ -123,41 +141,48 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     }
   });
 
-  app.get('/api/entities/:id/logs', { schema: { params: ID_PARAM, querystring: { type: 'object', properties: { tail: { type: 'integer', minimum: 1, maximum: 500 } } } }, preHandler: requireAdmin }, async (req, reply) => {
-    const e = entityOr404((req.params as { id: string }).id, reply);
+  app.get('/api/entities/:id/logs', { schema: { params: ID_PARAM, querystring: { type: 'object', properties: { tail: { type: 'integer', minimum: 1, maximum: 500 } } } }, preHandler: operator }, async (req, reply) => {
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
     if (!e) return;
     const d = scheduler.dockerFor(e.id);
     if (!d) return reply.code(404).send({ error: 'no container for this entity' });
     try {
       const lines = await d.adapter.logs(d.containerId, (req.query as { tail?: number }).tail ?? 200);
-      repo.audit({ actor: 'admin', ip: req.ip, action: 'logs.view', entityId: e.id, result: 'ok' });
+      repo.audit({ ...actor(req), ip: req.ip, action: 'logs.view', entityId: e.id, result: 'ok' });
       return { lines, redacted: true };
     } catch (err) {
       return reply.code(502).send({ error: redactError(err) });
     }
   });
 
-  app.get('/api/archive', async () => ({ entities: repo.listArchived().map((e) => repo.toView(e)) }));
+  app.get('/api/archive', async (req) => {
+    const p = me(req);
+    return { entities: repo.listArchived(500).filter((e) => entityVisible(p, e)).map((e) => repo.toView(e)) };
+  });
 
   app.get('/api/events', {
     schema: { querystring: { type: 'object', properties: { before: { type: 'string', maxLength: 40 }, limit: { type: 'integer', minimum: 1, maximum: 500 }, entity: { type: 'string', maxLength: 300 } } } },
   }, async (req) => {
     const q = req.query as { before?: string; limit?: number; entity?: string };
-    return { events: repo.listEvents({ before: q.before, limit: q.limit ?? 100, entityId: q.entity }) };
+    const p = me(req);
+    if (q.entity) { const e = repo.getEntity(q.entity); if (e && !entityVisible(p, e)) return { events: [] }; }
+    // Over-fetch then filter, so restricted users still get a full page when possible.
+    const limit = q.limit ?? 100;
+    return { events: repo.listEvents({ before: q.before, limit: Math.min(500, limit * 3), entityId: q.entity }).filter((ev) => eventVisible(p, ev)).slice(0, limit) };
   });
 
   app.patch('/api/entities/:id', {
-    preHandler: requireAdmin,
+    preHandler: operator,
     schema: { params: ID_PARAM, body: { type: 'object', additionalProperties: false, properties: { displayName: { type: ['string', 'null'], maxLength: 60 }, buildingType: { type: ['string', 'null'], maxLength: 20 } } } },
   }, async (req, reply) => {
-    const e = entityOr404((req.params as { id: string }).id, reply);
+    const e = entityOr404((req.params as { id: string }).id, req, reply);
     if (!e) return;
     const body = req.body as { displayName?: string | null; buildingType?: string | null };
     if (body.displayName !== undefined) {
       const name = body.displayName?.trim() || null;
       if (name && !/^[\p{L}\p{N} ._'()&+-]{1,60}$/u.test(name)) return reply.code(400).send({ error: 'invalid name' });
       repo.updateEntity(e.id, { displayName: name });
-      world.emit({ type: 'service.renamed', entityId: e.id, source: 'admin', details: { from: e.displayName ?? e.name, to: name ?? e.name } });
+      world.emit({ type: 'service.renamed', entityId: e.id, source: actor(req).actor, details: { from: e.displayName ?? e.name, to: name ?? e.name } });
     }
     if (body.buildingType !== undefined) {
       if (body.buildingType !== null && !isBuildingType(body.buildingType)) return reply.code(400).send({ error: 'invalid building type' });
@@ -165,31 +190,32 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
       if (body.buildingType) meta.typeOverride = body.buildingType; else delete meta.typeOverride;
       repo.updateEntity(e.id, { meta, ...(body.buildingType ? { buildingType: body.buildingType as never } : {}) });
     }
-    repo.audit({ actor: 'admin', ip: req.ip, action: 'entity.update', entityId: e.id, params: body as Record<string, unknown>, result: 'ok' });
+    repo.audit({ ...actor(req), ip: req.ip, action: 'entity.update', entityId: e.id, params: body as Record<string, unknown>, result: 'ok' });
     world.markDirty(e.id);
     world.flush();
     return { entity: repo.toView(repo.getEntity(e.id)!) };
   });
 
   app.put('/api/entities/:id/layout', {
-    preHandler: requireAdmin,
+    preHandler: operator,
     schema: { params: ID_PARAM, body: { type: 'object', required: ['x', 'y'], additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' } } } },
   }, async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!entityOr404(id, reply)) return;
+    if (!entityOr404(id, req, reply)) return;
     const { x, y } = req.body as { x: number; y: number };
-    const err = world.moveBuilding(id, x, y, 'admin');
-    repo.audit({ actor: 'admin', ip: req.ip, action: 'layout.move', entityId: id, params: { x, y }, result: err ?? 'ok' });
+    const err = world.moveBuilding(id, x, y, actor(req).actor);
+    repo.audit({ ...actor(req), ip: req.ip, action: 'layout.move', entityId: id, params: { x, y }, result: err ?? 'ok' });
     if (err) return reply.code(409).send({ error: err });
     return { ok: true };
   });
 
   // ---------- operations (allowlisted, admin only, audited) ----------
-  function actionAvailability(id: string): { enabled: boolean; reason: string | null; allowed: { action: Action; impact: string }[] } {
+  function actionAvailability(id: string, p: Principal | null): { enabled: boolean; reason: string | null; allowed: { action: Action; impact: string }[] } {
     const e = repo.getEntity(id);
     const none = (reason: string) => ({ enabled: false, reason, allowed: [] });
     if (!cfg.actionsEnabled) return none('operations are disabled (read-only mode; set ENABLE_ACTIONS=true)');
-    if (!auth.adminConfigured) return none('no ADMIN_TOKEN configured');
+    if (!auth.hasRole(p, 'operator')) return none('requires the operator or administrator role');
+    if (!e || !entityVisible(p, e)) return none('no access to this server');
     if (!e || e.kind !== 'service' || e.source !== 'docker') return none('only Docker services support actions');
     if (e.lifecycle === 'removed' || e.lifecycle === 'archived') return none('service has been removed');
     const d = scheduler.dockerFor(e.id);
@@ -202,22 +228,24 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
   }
 
   app.post('/api/entities/:id/actions', {
-    preHandler: requireAdmin,
+    preHandler: operator,
     schema: { params: ID_PARAM, body: { type: 'object', required: ['action', 'confirm'], additionalProperties: false, properties: { action: { type: 'string', enum: [...ACTIONS] }, confirm: { type: 'string', maxLength: 300 } } } },
   }, async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const { action, confirm } = req.body as { action: Action; confirm: string };
-    const audit = (result: string) => repo.audit({ actor: 'admin', ip: req.ip, action: `container.${action}`, entityId: id, params: { action }, result });
-    if (!actionLimiter.allow(`action:${req.ip}`)) { audit('rate-limited'); return reply.code(429).send({ error: 'too many actions, wait a minute' }); }
-    const avail = actionAvailability(id);
+    const p = me(req);
+    const audit = (result: string) => repo.audit({ ...auth.actor(p), ip: req.ip, action: `container.${action}`, entityId: id, params: { action }, result });
+    if (!actionLimiter.allow(`action:${p.user.id}`)) { audit('rate-limited'); return reply.code(429).send({ error: 'too many actions, wait a minute' }); }
+    const avail = actionAvailability(id, p);
     if (!avail.enabled || !avail.allowed.some((a) => a.action === action)) { audit(`rejected: ${avail.reason ?? 'action not allowed in current state'}`); return reply.code(403).send({ error: avail.reason ?? 'action not allowed in current state' }); }
     // The client must echo the entity id to confirm it saw the impact for this exact service.
     if (confirm !== id) { audit('rejected: confirmation mismatch'); return reply.code(400).send({ error: 'confirmation does not match this service' }); }
     const d = scheduler.dockerFor(id)!;
     try {
-      await d.adapter.action(d.containerId, action);
+      // Bounded: a hung Docker API must not leave the request (or the operator) waiting forever.
+      await Promise.race([d.adapter.action(d.containerId, action), new Promise((_, rej) => setTimeout(() => rej(new Error('action timed out after 30 s; check the service state before retrying')), 30_000))]);
       audit('ok');
-      world.emit({ type: 'action.performed', entityId: id, source: 'admin', severity: 'notice', details: { action } });
+      world.emit({ type: 'action.performed', entityId: id, source: p.user.username, severity: 'notice', details: { action, by: p.user.username } });
       void scheduler.cycle();
       return { ok: true };
     } catch (err) {
@@ -227,7 +255,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     }
   });
 
-  app.get('/api/audit', { preHandler: requireAdmin }, async () => ({ entries: repo.listAudit(200) }));
+  app.get('/api/audit', { preHandler: admin }, async () => ({ entries: repo.listAudit(200) }));
 
   // ---------- event ingestion (e.g. from n8n webhooks), token protected ----------
   app.post('/api/ingest/events', {
@@ -254,17 +282,22 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
 
   // ---------- websocket ----------
   app.get('/ws', { websocket: true }, (socket, req) => {
-    if (cfg.requireAuthForView && !auth.isAdmin(req)) { socket.close(4401, 'authentication required'); return; }
+    let p = auth.principal(req);
+    if (!p) { socket.close(4401, 'authentication required'); return; }
     const send = (m: ServerMessage) => { if (socket.readyState === 1) socket.send(JSON.stringify(m)); };
-    send({ t: 'snapshot', data: snapshot() });
+    send({ t: 'snapshot', data: snapshot(p) });
+    // Every pushed message is filtered for this user, exactly like the REST API.
     const unsub = world.subscribe({
-      entity: (v) => send({ t: 'entity', data: v }),
-      event: (e) => send({ t: 'event', data: e }),
-      blocks: (b) => send({ t: 'blocks', data: b }),
+      entity: (v) => { if (p && entityVisible(p, v)) send({ t: 'entity', data: v }); },
+      event: (e) => { if (p && eventVisible(p, e)) send({ t: 'event', data: e }); },
+      blocks: (b) => send({ t: 'blocks', data: b.filter((x) => blockVisible(p, x)) }),
     });
     const extra = setInterval(() => {
-      send({ t: 'adapters', data: repo.listAdapterStates() });
-      send({ t: 'hints', data: scheduler.hints });
+      // Sessions can be revoked, users disabled or their server access changed: re-check regularly.
+      p = p ? auth.stillValid(p) : null;
+      if (!p) { socket.close(4401, 'session ended'); return; }
+      send({ t: 'adapters', data: repo.listAdapterStates().filter((a) => adapterVisible(p, a)) });
+      send({ t: 'hints', data: scheduler.hints.filter((h) => hintVisible(p, h)) });
     }, 15_000);
     socket.on('close', () => { unsub(); clearInterval(extra); });
     socket.on('message', () => { /* clients do not send commands over the socket */ });

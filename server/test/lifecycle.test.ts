@@ -9,6 +9,7 @@ import { DemoAdapter } from '../src/adapters/demo.js';
 import { DockerClient } from '../src/adapters/dockerClient.js';
 import { loadConfig } from '../src/config.js';
 import { buildApp } from '../src/app.js';
+import { signIn } from './helpers.js';
 
 // ---------- helpers ----------
 
@@ -267,10 +268,15 @@ describe('persistence and safety', () => {
       expect(noAuth.statusCode).toBe(401);
       const badToken = await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, headers: { authorization: 'Bearer wrong' }, payload: { action: 'restart', confirm: 'host:local' } });
       expect(badToken.statusCode).toBe(401);
-      const forged = await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, cookies: { bw_session: `${Date.now() + 1e9}.forged` }, payload: { action: 'restart', confirm: 'host:local' } });
+      const forged = await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, cookies: { bw_sid: 'forged-session-token' }, payload: { action: 'restart', confirm: 'host:local' } });
       expect(forged.statusCode).toBe(401);
-      // Authorized, but a host is not an allowlisted target and arbitrary actions fail validation.
-      const auth = { authorization: 'Bearer correct-horse-battery-staple' };
+      // The bootstrap token is not an API credential.
+      expect((await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, headers: { authorization: 'Bearer correct-horse-battery-staple' }, payload: { action: 'restart', confirm: 'host:local' } })).statusCode).toBe(401);
+      // A viewer may not operate anything.
+      const viewer = { cookie: await signIn(app, 'viewer') };
+      expect((await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, headers: viewer, payload: { action: 'restart', confirm: 'host:local' } })).statusCode).toBe(403);
+      // Authorized operator, but a host is not an allowlisted target and arbitrary actions fail validation.
+      const auth = { cookie: await signIn(app, 'operator') };
       expect((await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, headers: auth, payload: { action: 'restart', confirm: 'host:local' } })).statusCode).toBe(403);
       expect((await app.http.inject({ method: 'POST', url: `/api/entities/${id}/actions`, headers: auth, payload: { action: 'exec', confirm: 'host:local' } })).statusCode).toBe(400);
       expect((await app.http.inject({ method: 'GET', url: `/api/entities/${id}/logs` })).statusCode).toBe(401);

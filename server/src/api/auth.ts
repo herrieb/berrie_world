@@ -1,15 +1,12 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { Role } from '@berrie/shared';
+import { ROLE_RANK } from '@berrie/shared';
 import type { AppConfig } from '../config.js';
 import type { Repo } from '../db/repo.js';
+import type { SessionRow, UserRow } from '../db/users.js';
+import { randomToken, safeEqual, sha256 } from '../core/secrets.js';
 
-const COOKIE = 'bw_session';
-const SESSION_HOURS = 12;
-
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a), bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
+const COOKIE = 'bw_sid';
 
 /** Fixed-window in-memory rate limiter keyed by IP + bucket. */
 export class RateLimiter {
@@ -28,52 +25,145 @@ export class RateLimiter {
   }
 }
 
+export interface Principal {
+  user: UserRow;
+  session: SessionRow | null;
+}
+
+/** Anything that belongs to a server: entities, events, adapters. `hostId` null = not tied to a server. */
+export interface HostScoped { hostId: string | null }
+
 export class Auth {
-  private readonly secret: string;
-  readonly loginLimiter = new RateLimiter(5, 60_000);
+  readonly loginLimiter = new RateLimiter(10, 60_000);
+  readonly userLimiter = new RateLimiter(10, 15 * 60_000);
+  private cache = new WeakMap<FastifyRequest, { full: Principal | null; pending: SessionRow | null }>();
 
-  constructor(private readonly cfg: AppConfig, repo: Repo) {
-    let s = cfg.sessionSecret ?? repo.getSetting('session_secret');
-    if (!s) { s = randomBytes(32).toString('hex'); repo.setSetting('session_secret', s); }
-    this.secret = s;
+  constructor(private readonly cfg: AppConfig, private readonly repo: Repo) {}
+
+  get users() {
+    return this.repo.users;
   }
 
-  get adminConfigured(): boolean {
-    return !!this.cfg.adminToken;
+  get setupRequired(): boolean {
+    return this.users.count() === 0;
   }
 
-  private sign(v: string): string {
-    return createHmac('sha256', this.secret).update(v).digest('base64url');
-  }
-
-  checkToken(token: unknown): boolean {
+  /** The bootstrap token (ADMIN_TOKEN) is only used to create the first administrator. */
+  checkBootstrapToken(token: unknown): boolean {
     return !!this.cfg.adminToken && typeof token === 'string' && token.length <= 512 && safeEqual(token, this.cfg.adminToken);
   }
 
-  issue(reply: FastifyReply): void {
-    const exp = String(Date.now() + SESSION_HOURS * 3600_000);
-    reply.setCookie(COOKIE, `${exp}.${this.sign(exp)}`, {
-      httpOnly: true, sameSite: 'strict', secure: this.cfg.secureCookies, path: '/', maxAge: SESSION_HOURS * 3600,
+  // ---------------------------------------------------------------- sessions
+
+  issueSession(req: FastifyRequest, reply: FastifyReply, userId: string, mfaPending: boolean): void {
+    const token = randomToken(32);
+    const now = Date.now();
+    this.users.createSession({
+      id: sha256(token), userId, createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + (mfaPending ? 10 * 60_000 : this.cfg.session.maxDays * 86400_000)).toISOString(),
+      lastSeenAt: new Date(now).toISOString(), ip: req.ip ?? null, userAgent: String(req.headers['user-agent'] ?? '').slice(0, 200), mfaPending,
     });
+    reply.setCookie(COOKIE, token, {
+      httpOnly: true, sameSite: 'strict', secure: this.cfg.secureCookies, path: '/',
+      maxAge: mfaPending ? 600 : this.cfg.session.maxDays * 86400,
+    });
+    this.cache.delete(req);
   }
 
-  clear(reply: FastifyReply): void {
+  endSession(req: FastifyRequest, reply: FastifyReply): void {
+    const s = this.sessionFromCookie(req);
+    if (s) this.users.deleteSession(s.id);
     reply.clearCookie(COOKIE, { path: '/' });
+    this.cache.delete(req);
   }
 
-  isAdmin(req: FastifyRequest): boolean {
-    if (!this.cfg.adminToken) return false;
-    const h = req.headers.authorization;
-    if (h?.startsWith('Bearer ') && this.checkToken(h.slice(7))) return true;
-    const c = req.cookies?.[COOKIE];
-    if (!c) return false;
-    const [exp, sig] = c.split('.');
-    if (!exp || !sig || !safeEqual(sig, this.sign(exp))) return false;
-    return Number(exp) > Date.now();
+  private sessionFromCookie(req: FastifyRequest): SessionRow | null {
+    const token = req.cookies?.[COOKIE];
+    if (!token || token.length > 100) return null;
+    const s = this.users.getSession(sha256(token));
+    if (!s) return null;
+    const now = Date.now();
+    const idleLimit = now - this.cfg.session.idleHours * 3600_000;
+    if (Date.parse(s.expiresAt) < now || Date.parse(s.lastSeenAt) < idleLimit) {
+      this.users.deleteSession(s.id);
+      return null;
+    }
+    if (now - Date.parse(s.lastSeenAt) > 60_000) this.users.touchSession(s.id, new Date(now).toISOString());
+    return s;
+  }
+
+  private resolve(req: FastifyRequest): { full: Principal | null; pending: SessionRow | null } {
+    const hit = this.cache.get(req);
+    if (hit) return hit;
+    let out: { full: Principal | null; pending: SessionRow | null } = { full: null, pending: null };
+    const s = this.sessionFromCookie(req);
+    if (s) {
+      const user = this.users.get(s.userId);
+      if (user && user.status === 'active') out = s.mfaPending ? { full: null, pending: s } : { full: { user, session: s }, pending: null };
+      else this.users.deleteSession(s.id);
+    }
+    this.cache.set(req, out);
+    return out;
+  }
+
+  /** Signed-in user with completed MFA, or null. */
+  principal(req: FastifyRequest): Principal | null {
+    return this.resolve(req).full;
+  }
+
+  /** Session that has passed the password step but still needs a TOTP code. */
+  pendingMfa(req: FastifyRequest): SessionRow | null {
+    return this.resolve(req).pending;
+  }
+
+  /** Re-check a long-lived principal (WebSocket) against the database. */
+  stillValid(p: Principal): Principal | null {
+    if (!p.session) return null;
+    const s = this.users.getSession(p.session.id);
+    if (!s || s.mfaPending || Date.parse(s.expiresAt) < Date.now()) return null;
+    const user = this.users.get(s.userId);
+    return user && user.status === 'active' ? { user, session: s } : null;
+  }
+
+  // ---------------------------------------------------------------- authorization
+
+  hasRole(p: Principal | null, role: Role): boolean {
+    return !!p && ROLE_RANK[p.user.role] >= ROLE_RANK[role];
+  }
+
+  /** Per-server access. Administrators and 'all'-scope users see every server. */
+  canHost(p: Principal | null, hostId: string | null): boolean {
+    if (!p) return false;
+    if (hostId === null) return true;
+    if (p.user.role === 'admin' || p.user.hostScope === 'all') return true;
+    return p.user.hosts.includes(hostId);
+  }
+
+  /** True for administrators and users whose access is not limited to a server list. */
+  seesAllHosts(p: Principal | null): boolean {
+    return !!p && (p.user.role === 'admin' || p.user.hostScope === 'all');
+  }
+
+  canSee(p: Principal | null, e: HostScoped): boolean {
+    return this.canHost(p, e.hostId);
+  }
+
+  /** Fastify preHandler: require a signed-in user with at least `role`. */
+  require(role: Role) {
+    return async (req: FastifyRequest, reply: FastifyReply) => {
+      const p = this.principal(req);
+      if (!p) return reply.code(401).send({ error: 'authentication required' });
+      if (!this.hasRole(p, role)) return reply.code(403).send({ error: `requires ${role} role` });
+    };
   }
 
   isIngest(req: FastifyRequest): boolean {
     const h = req.headers.authorization;
     return !!this.cfg.ingestToken && !!h?.startsWith('Bearer ') && safeEqual(h.slice(7), this.cfg.ingestToken);
+  }
+
+  /** Actor string for audit records. */
+  actor(p: Principal | null): { actor: string; userId: string | null } {
+    return p ? { actor: p.user.username, userId: p.user.id } : { actor: 'anonymous', userId: null };
   }
 }

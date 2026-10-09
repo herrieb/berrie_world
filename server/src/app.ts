@@ -10,11 +10,14 @@ import { Scheduler } from './core/scheduler.js';
 import { DemoAdapter } from './adapters/demo.js';
 import { Auth } from './api/auth.js';
 import { registerRoutes } from './api/routes.js';
+import { registerAccountRoutes } from './api/accountRoutes.js';
+import { SecretBox } from './core/secrets.js';
 
 export interface App {
   http: FastifyInstance;
   repo: Repo;
   world: World;
+  box: SecretBox;
   scheduler: Scheduler;
   close: () => Promise<void>;
 }
@@ -42,6 +45,8 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
     log: (msg, extra) => http.log.warn(extra ?? {}, msg),
   }, cfg.mode === 'demo' ? new DemoAdapter() : null);
   const auth = new Auth(cfg, repo);
+  const box = new SecretBox(cfg.masterKey ?? undefined, cfg.dataDir);
+  const knownHosts = () => repo.listEntities().filter((e) => e.kind === 'host').map((e) => e.id).sort();
 
   await http.register(cookie);
   await http.register(websocket, { options: { maxPayload: 4096 } });
@@ -51,6 +56,20 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
     reply.header('Referrer-Policy', 'same-origin');
     return payload;
   });
+  // CSRF defence in depth (cookies are already SameSite=Strict): state-changing requests from a browser
+  // must come from our own origin.
+  http.addHook('onRequest', async (req, reply) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
+    const origin = req.headers.origin;
+    if (!origin) return; // non-browser clients (agents, ingest, curl) authenticate with bearer tokens
+    const host = (process.env.TRUST_PROXY === 'true' && req.headers['x-forwarded-host']) || req.headers.host;
+    try {
+      if (new URL(origin).host !== host) return reply.code(403).send({ error: 'cross-origin request refused' });
+    } catch {
+      return reply.code(403).send({ error: 'cross-origin request refused' });
+    }
+  });
+  await registerAccountRoutes(http, { cfg, repo, auth, box, knownHosts });
   await registerRoutes(http, { cfg, world, scheduler, auth, selfContainerId: selfContainerId() });
 
   if (cfg.webDist && existsSync(cfg.webDist)) {
@@ -64,7 +83,7 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
   if (opts.startScheduler !== false) scheduler.start();
 
   return {
-    http, repo, world, scheduler,
+    http, repo, world, scheduler, box,
     close: async () => {
       scheduler.stop();
       await http.close();

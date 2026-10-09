@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { EntityView } from '@berrie/shared';
 import { useStore } from '../state/store';
-import { api, refreshAuth } from '../state/api';
+import { api } from '../state/api';
 import { fmtBytes, timeAgo } from './status';
 import { Icon } from './Icon';
 
@@ -14,9 +14,6 @@ export function SettingsView() {
   const s = useStore();
   const [health, setHealth] = useState<SelfHealth | null>(null);
   const [archive, setArchive] = useState<EntityView[]>([]);
-  const [audit, setAudit] = useState<{ id: number; ts: string; action: string; entity_id: string | null; result: string; ip: string }[]>([]);
-  const [token, setToken] = useState('');
-  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     const load = () => {
@@ -27,34 +24,11 @@ export function SettingsView() {
     const t = setInterval(load, 10_000);
     return () => clearInterval(t);
   }, []);
-  useEffect(() => { if (s.admin) api<{ entries: typeof audit }>('/api/audit').then((r) => setAudit(r.entries)).catch(() => undefined); }, [s.admin]);
-
-  const login = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErr(null);
-    try { await api('/api/auth/login', { method: 'POST', json: { token } }); setToken(''); await refreshAuth(); }
-    catch (x) { setErr((x as Error).message); }
-  };
-  const logout = async () => { await api('/api/auth/logout', { method: 'POST' }); await refreshAuth(); };
 
   return (
     <div className="page settings">
       <div className="page-head"><h1>Settings & system</h1></div>
       <div className="grid2">
-        <section className="card">
-          <h3><Icon name="lock" /> Administration</h3>
-          {!s.adminConfigured ? <p className="muted">No <code>ADMIN_TOKEN</code> is configured on the server. Berrie World is read-only; renaming, layout editing, logs and container actions are unavailable.</p>
-            : s.admin ? (
-              <><p>Signed in as admin. Container actions are <b>{s.actionsEnabled ? 'enabled' : 'disabled (ENABLE_ACTIONS=false)'}</b>.</p><button onClick={() => void logout()}>Sign out</button></>
-            ) : (
-              <form onSubmit={(e) => void login(e)} className="login">
-                <input type="password" placeholder="Admin token" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="current-password" />
-                <button className="primary" type="submit">Sign in</button>
-                {err && <p className="msg">{err}</p>}
-              </form>
-            )}
-        </section>
-
         <section className="card">
           <h3>Berrie World itself</h3>
           {health ? (
@@ -109,7 +83,7 @@ export function SettingsView() {
 
         <section className="card">
           <h3><Icon name="archive" /> Archive</h3>
-          {!archive.length ? <p className="muted">No archived services.</p> : (
+          {!archive.length ? <p className="muted">No archived entities.</p> : (
             <table className="table compact">
               <thead><tr><th>Name</th><th>Removed</th><th>Archived</th></tr></thead>
               <tbody>{archive.map((e) => <tr key={e.id}><td>{e.displayName}<small className="mono">{e.id}</small></td><td>{e.removedAt ? new Date(e.removedAt).toLocaleString() : '—'}</td><td>{e.archivedAt ? new Date(e.archivedAt).toLocaleString() : '—'}</td></tr>)}</tbody>
@@ -117,15 +91,6 @@ export function SettingsView() {
           )}
         </section>
 
-        {s.admin && (
-          <section className="card">
-            <h3>Audit log</h3>
-            <table className="table compact">
-              <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Result</th></tr></thead>
-              <tbody>{audit.slice(0, 40).map((a) => <tr key={a.id}><td>{new Date(a.ts).toLocaleString()}</td><td>{a.action}</td><td className="mono">{a.entity_id ?? '—'}</td><td>{a.result}</td></tr>)}</tbody>
-            </table>
-          </section>
-        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Alert, BuildingType, Summary } from '@berrie/shared';
-import { useStore, matchesFilters, filtersActive } from '../state/store';
-import { onServerMessage, api } from '../state/api';
+import { useStore, matchesFilters, filtersActive, useRole } from '../state/store';
+import { onServerMessage, api, savePrefs } from '../state/api';
 import { WorldRenderer } from '../world/WorldRenderer';
 import { Inspector } from './Inspector';
 import { ActivityPanel } from './ActivityPanel';
@@ -17,6 +17,8 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const [camTick, setCamTick] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const s = useStore();
+  const canOperate = useRole('operator');
+  const [saving, setSaving] = useState<string | null>(null);
   const list = useMemo(() => Object.values(s.entities), [s.entities]);
 
   useEffect(() => {
@@ -27,6 +29,8 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         catch (e) { setToast(`Move rejected: ${(e as Error).message}`); }
       },
       onCamera: () => setCamTick((t) => t + 1),
+      // Camera position is personal; persisted (debounced) so it follows the user across devices.
+      onCameraSettled: (camera) => savePrefs({ camera }),
     });
     rendererRef.current = r;
     let cancelled = false;
@@ -39,8 +43,8 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
 
   useEffect(() => {
     if (!ready) return;
-    rendererRef.current?.update({ entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout });
-  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout]);
+    rendererRef.current?.update({ entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout, labelDensity: s.prefs.labelDensity ?? 'auto', initialCamera: s.prefs.camera ?? null });
+  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera]);
 
   useEffect(() => { if (ready && s.selectedId && s.focusTick) rendererRef.current?.focus(s.selectedId); }, [s.focusTick, ready]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
@@ -89,7 +93,25 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
               {hosts.map((h) => <option key={h.id} value={h.id}>{h.displayName}</option>)}
             </select>
           </div>
-          {filtersActive(s.filters) && <button className="link-btn" onClick={() => s.setFilters({ text: '', health: 'all', type: 'all', host: 'all' })}>Clear filters</button>}
+          {filtersActive(s.filters) && (
+            <div className="row">
+              <button className="link-btn" onClick={() => s.setFilters({ text: '', health: 'all', type: 'all', host: 'all' })}>Clear filters</button>
+              {saving === null
+                ? <button className="link-btn" onClick={() => setSaving('')}><Icon name="bookmark" size={12} /> Save view</button>
+                : (
+                  <form className="save-view" onSubmit={(ev) => { ev.preventDefault(); if (!saving.trim()) return; void api<{ view: import('@berrie/shared').SavedView }>('/api/account/views', { method: 'POST', json: { name: saving.trim(), view: { filters: s.filters, camera: rendererRef.current?.camera() } } }).then((r) => { s.setPersonal({ savedViews: [...s.savedViews, r.view] }); setSaving(null); setToast('View saved to your home page.'); }).catch((e) => setToast((e as Error).message)); }}>
+                    <input autoFocus placeholder="View name" maxLength={60} value={saving} onChange={(ev) => setSaving(ev.target.value)} />
+                    <button type="submit">Save</button>
+                  </form>
+                )}
+            </div>
+          )}
+          {s.savedViews.length > 0 && (
+            <select value="" onChange={(ev) => { const v = s.savedViews.find((x) => x.id === ev.target.value); if (v) { s.setFilters(v.view.filters as never); if (v.view.camera) rendererRef.current?.setCamera(v.view.camera); } }} aria-label="My saved views">
+              <option value="">My saved views…</option>
+              {s.savedViews.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+          )}
         </div>
         {noBuilding.length > 0 && <p className="hint-small">{noBuilding.length} service(s) without a plot (district full).</p>}
       </aside>
@@ -98,7 +120,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         <button onClick={() => rendererRef.current?.zoomBy(1.25)} title="Zoom in (+)"><Icon name="plus" /></button>
         <button onClick={() => rendererRef.current?.zoomBy(0.8)} title="Zoom out (−)"><Icon name="minus" /></button>
         <button onClick={() => rendererRef.current?.fit()} title="Fit village"><Icon name="target" /></button>
-        {s.admin && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
+        {canOperate && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
       </div>
       {ready && <Minimap renderer={rendererRef.current!} tick={camTick} entitiesKey={list.length + s.blocks.length} />}
       {s.editLayout && <div className="edit-banner">Layout editor: drag a building to a free spot. Positions are saved and pinned.<button onClick={() => s.setEditLayout(false)}>Done</button></div>}

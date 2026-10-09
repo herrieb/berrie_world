@@ -49,8 +49,9 @@ export interface AppConfig {
   webDist: string | null;
   adminToken: string | null;
   ingestToken: string | null;
-  sessionSecret: string | null;
-  requireAuthForView: boolean;
+  /** BERRIE_MASTER_KEY: encrypts stored credentials and TOTP seeds. Falls back to a 0600 key file in DATA_DIR. */
+  masterKey: string | null;
+  session: { maxDays: number; idleHours: number };
   actionsEnabled: boolean;
   secureCookies: boolean;
   discoveryIntervalSeconds: number;
@@ -100,8 +101,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     webDist: env.WEB_DIST ? resolve(env.WEB_DIST) : null,
     adminToken: env.ADMIN_TOKEN || null,
     ingestToken: env.INGEST_TOKEN || null,
-    sessionSecret: env.SESSION_SECRET || null,
-    requireAuthForView: envBool(env.REQUIRE_AUTH_FOR_VIEW, false),
+    masterKey: env.BERRIE_MASTER_KEY || null,
+    session: { maxDays: envInt(env.SESSION_DAYS, 7), idleHours: envInt(env.SESSION_IDLE_HOURS, 24) },
     actionsEnabled: envBool(env.ENABLE_ACTIONS, false),
     secureCookies: envBool(env.SECURE_COOKIES, false),
     discoveryIntervalSeconds: envInt(env.DISCOVERY_INTERVAL, file.discoveryIntervalSeconds ?? 30),

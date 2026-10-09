@@ -235,3 +235,76 @@ export function computeSummary(
   }
   return s;
 }
+
+// ---------------------------------------------------------------- accounts
+
+export type Role = 'admin' | 'operator' | 'viewer';
+export const ROLES: Role[] = ['admin', 'operator', 'viewer'];
+export const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
+export const ROLE_LABEL: Record<Role, string> = { admin: 'Administrator', operator: 'Operator', viewer: 'Viewer' };
+
+/** Procedurally generated pixel avatar; no uploads. */
+export interface Avatar { seed: number; color: string; style: number }
+
+export interface UserView {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string | null;
+  role: Role;
+  /** 'all' = every server; 'list' = only `hosts`. Admins always see everything. */
+  hostScope: 'all' | 'list';
+  hosts: string[];
+  status: 'active' | 'disabled' | 'deleted';
+  totpEnabled: boolean;
+  avatar: Avatar | null;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface Me {
+  user: UserView | null;
+  /** No users exist yet: the first administrator must be created with the bootstrap token. */
+  setupRequired: boolean;
+  /** Password accepted, waiting for the TOTP code. */
+  mfaPending: boolean;
+  actionsEnabled: boolean;
+}
+
+export interface NotificationPrefs {
+  inApp: boolean;
+  browser: boolean;
+  minSeverity: Severity;
+  /** Only notify about servers the user has marked as favorite. */
+  favoritesOnly: boolean;
+}
+
+/** Personal, per-user state. Never affects what other users see. */
+export interface UserPrefs {
+  daylight?: 'auto' | 'day' | 'night';
+  camera?: { x: number; y: number; zoom: number };
+  /** Personal island arrangement: offset in tiles per island (host entity id). */
+  islandOffsets?: Record<string, { dx: number; dy: number }>;
+  labelDensity?: 'less' | 'auto' | 'more';
+  notifications?: NotificationPrefs;
+}
+
+export interface SavedViewFilters { text: string; health: string; type: string; host: string }
+export interface SavedView {
+  id: string;
+  name: string;
+  view: { filters: SavedViewFilters; camera?: { x: number; y: number; zoom: number } };
+  createdAt: string;
+}
+
+export interface UserTask {
+  id: string;
+  title: string;
+  notes: string | null;
+  entityId: string | null;
+  dueAt: string | null;
+  doneAt: string | null;
+  createdAt: string;
+}
+
+export const DEFAULT_NOTIFICATIONS: NotificationPrefs = { inApp: true, browser: false, minSeverity: 'warning', favoritesOnly: false };

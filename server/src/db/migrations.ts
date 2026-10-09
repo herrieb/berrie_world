@@ -139,6 +139,100 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE layout; DROP TABLE entity_status; DROP TABLE entities;
     `,
   },
+  {
+    version: 2,
+    name: 'users, sessions and personal state',
+    up: `
+      CREATE TABLE users (
+        id                   TEXT PRIMARY KEY,
+        username             TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name         TEXT NOT NULL,
+        email                TEXT,
+        password_hash        TEXT,                    -- scrypt; NULL once deleted
+        role                 TEXT NOT NULL CHECK (role IN ('admin','operator','viewer')),
+        host_scope           TEXT NOT NULL DEFAULT 'all' CHECK (host_scope IN ('all','list')),
+        totp_secret          TEXT,                    -- encrypted with the master key
+        totp_enabled         INTEGER NOT NULL DEFAULT 0,
+        totp_last_step       INTEGER,                 -- replay protection
+        avatar               TEXT,                    -- JSON {seed,color,style}; generated pixel art, no uploads
+        status               TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','deleted')),
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        last_login_at        TEXT,
+        password_changed_at  TEXT
+      );
+      CREATE TABLE user_hosts (
+        user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        host_id  TEXT NOT NULL,                       -- host entity id, e.g. host:srv01
+        PRIMARY KEY (user_id, host_id)
+      );
+      CREATE TABLE sessions (
+        id            TEXT PRIMARY KEY,               -- sha256 of the cookie token; the token itself is never stored
+        user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at    TEXT NOT NULL,
+        expires_at    TEXT NOT NULL,
+        last_seen_at  TEXT NOT NULL,
+        ip            TEXT,
+        user_agent    TEXT,
+        mfa_pending   INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_sessions_user ON sessions(user_id);
+      CREATE TABLE invitations (
+        id          TEXT PRIMARY KEY,
+        token_hash  TEXT NOT NULL UNIQUE,
+        role        TEXT NOT NULL CHECK (role IN ('admin','operator','viewer')),
+        host_scope  TEXT NOT NULL DEFAULT 'all',
+        hosts       TEXT NOT NULL DEFAULT '[]',
+        email       TEXT,
+        note        TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        used_at     TEXT,
+        used_by     TEXT,
+        revoked_at  TEXT
+      );
+      CREATE TABLE password_resets (
+        token_hash  TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        used_at     TEXT
+      );
+      -- Personal state. Deleted with the user; shared infrastructure history never references these.
+      CREATE TABLE user_prefs (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, prefs TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+      CREATE TABLE favorites (
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        entity_id   TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (user_id, entity_id)
+      );
+      CREATE TABLE saved_views (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        view        TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+      );
+      CREATE TABLE user_tasks (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title       TEXT NOT NULL,
+        notes       TEXT,
+        entity_id   TEXT,
+        due_at      TEXT,
+        done_at     TEXT,
+        created_at  TEXT NOT NULL
+      );
+      ALTER TABLE audit_log ADD COLUMN user_id TEXT;
+    `,
+    down: `
+      ALTER TABLE audit_log DROP COLUMN user_id;
+      DROP TABLE user_tasks; DROP TABLE saved_views; DROP TABLE favorites; DROP TABLE user_prefs;
+      DROP TABLE password_resets; DROP TABLE invitations; DROP TABLE sessions; DROP TABLE user_hosts; DROP TABLE users;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database, target = MIGRATIONS.at(-1)!.version): void {

@@ -11,7 +11,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5180,
     strictPort: true,
-    proxy: { '/api': api, '/ws': { target: api.replace('http', 'ws'), ws: true } },
+    // Keep the browser's Host header so the server's same-origin check sees the real origin.
+    proxy: { '/api': { target: api, changeOrigin: false }, '/ws': { target: api.replace('http', 'ws'), ws: true, changeOrigin: false } },
   },
   build: { outDir: 'dist', chunkSizeWarningLimit: 1200 },
 });

@@ -49,11 +49,33 @@ entities and vice versa. Use `DEMO_MODE=1 PORT=4781 DATA_DIR=./data/demo npx tsx
 
 Deep links: `/#/e/<entity id>` selects a building; `/?view=services|events|alerts|settings` opens a view.
 
+## Accounts and permissions
+
+Everyone signs in with a personal account. On first start nobody exists yet: the web UI asks for the bootstrap token
+(`ADMIN_TOKEN`) to create the first administrator; after that the token is not a credential anymore.
+
+| Role | Can |
+|---|---|
+| viewer | see the world, events and history for the servers they have access to |
+| operator | viewer + view logs, rename/arrange buildings, run allowlisted container actions (if enabled) |
+| admin | everything, including people, invitations, the audit log and (later) Server Harbor; always all servers |
+
+- Per-server access: each non-admin user has access to *all servers* or a selected list. Every REST endpoint and every
+  WebSocket message is filtered server-side; hidden entities answer like unknown ones (404).
+- Passwords are hashed with scrypt; sessions are random tokens stored only as SHA-256 hashes, with an absolute lifetime
+  (`SESSION_DAYS`) and idle timeout (`SESSION_IDLE_HOURS`), revocable per device.
+- Optional TOTP two-factor (RFC 6238) with replay protection; seeds are encrypted with `BERRIE_MASTER_KEY`.
+- Invitations and password-reset links are one-time, expiring links created by administrators (no email needed).
+- Removing a person deletes their personal state (preferences, favorites, saved views, tasks, sessions); events,
+  audit entries and other shared history stay intact.
+- Personal (per-user, never shared): camera, island arrangement, favorites, saved views, tasks, notification settings.
+- Recovery from a shell: `docker exec berrie-world node server/dist/cli.js list-users | reset-password <user> | disable-mfa <user>`.
+
 ## Configuration
 
-Environment (see `.env.example`): `ADMIN_TOKEN`, `INGEST_TOKEN`, `ENABLE_ACTIONS`, `REQUIRE_AUTH_FOR_VIEW`,
-`SECURE_COOKIES`, `TRUST_PROXY`, `PORT`, `BIND_HOST`, `DATA_DIR`, `CONFIG_PATH`, `DOCKER_PROXY_URL` / `DOCKER_SOCKET`,
-`HOST_ID`, `HOST_NAME`, `DISCOVERY_INTERVAL`, `DEMO_MODE`.
+Environment (see `.env.example`): `ADMIN_TOKEN` (bootstrap), `BERRIE_MASTER_KEY`, `SESSION_DAYS`, `SESSION_IDLE_HOURS`,
+`INGEST_TOKEN`, `ENABLE_ACTIONS`, `SECURE_COOKIES`, `TRUST_PROXY`, `PORT`, `BIND_HOST`, `DATA_DIR`, `CONFIG_PATH`,
+`DOCKER_PROXY_URL` / `DOCKER_SOCKET`, `HOST_ID`, `HOST_NAME`, `DISCOVERY_INTERVAL`, `DEMO_MODE`.
 
 `config/berrie.config.json` (see the example) holds hosts, host reachability probes, manual services with HTTP/TCP checks,
 endpoints (hostname → `compose:<project>/<service>` | `container:<name>` | entity id), optional cloudflared
@@ -93,12 +115,11 @@ curl -s http://127.0.0.1:4780/api/health
   on an `internal` network with GET-only access to containers, events, info, ping and version. Exec, images, volumes,
   networks, secrets, build and auth stay denied.
 - Operations: set `ENABLE_ACTIONS=true` **and** `PROXY_ALLOW_POST=1`. Actions are limited to start/stop/restart of
-  Docker services, require an admin session, a confirmation that echoes the entity id, a rate limit, and are
-  audited. Containers marked protected (including Berrie World and its proxy) are never controllable.
+  Docker services, require an operator or admin with access to that server, a confirmation that echoes the entity id,
+  a per-user rate limit and a 30 s timeout, and are audited. Containers marked protected (including Berrie World and its proxy) are never controllable.
 - Limits: app `mem_limit 256m`, `cpus 0.5`, read-only root filesystem; proxy `64m`. Measured locally: ~34 MiB / ~1.4% CPU idle.
-- Public access: do **not** expose without authentication. Recommended: a Cloudflare Tunnel public hostname protected by
-  Cloudflare Access, plus `REQUIRE_AUTH_FOR_VIEW=true`, `SECURE_COOKIES=true`, `TRUST_PROXY=true`. No DNS/tunnel changes
-  are made by this project.
+- Public access: every page requires sign-in. Behind a tunnel/proxy set `SECURE_COOKIES=true` and `TRUST_PROXY=true`;
+  Cloudflare Access in front adds a second layer. No DNS/tunnel changes are made by this project.
 
 ### Backup and restore
 
@@ -110,6 +131,8 @@ docker exec berrie-world node -e "require('better-sqlite3')('/data/berrie.sqlite
 
 Restore: `docker compose stop berrie-world`, replace `data/berrie.sqlite` with the backup and remove any
 `berrie.sqlite-wal`/`-shm` files, then run `docker compose start berrie-world`. Layout, history and archive come back intact.
+Encrypted values (TOTP seeds, stored credentials) need the same master key: back up `BERRIE_MASTER_KEY` (or
+`data/master.key`) separately and securely — without it those values cannot be decrypted.
 
 ### Retention
 

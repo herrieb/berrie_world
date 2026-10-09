@@ -8,6 +8,7 @@ import type {
 } from '@berrie/shared';
 import { BLOCK_PITCH } from '@berrie/shared';
 import { migrate } from './migrations.js';
+import { Users } from './users.js';
 
 export interface EntityRow {
   id: string;
@@ -96,6 +97,7 @@ export function newId(): string {
 
 export class Repo {
   readonly db: Database.Database;
+  readonly users: Users;
 
   constructor(
     path: string,
@@ -108,6 +110,7 @@ export class Repo {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 3000');
     migrate(this.db);
+    this.users = new Users(this.db, () => this.now());
     // A database belongs to exactly one mode; refuse to open the live DB in demo mode or vice versa.
     const stored = this.getSetting('origin');
     if (!stored) this.setSetting('origin', mode);
@@ -289,9 +292,9 @@ export class Repo {
   }
 
   // ---------- audit ----------
-  audit(a: { actor: string; ip: string | null; action: string; entityId: string | null; params?: Record<string, unknown>; result: string }): void {
-    this.db.prepare('INSERT INTO audit_log (ts, actor, ip, action, entity_id, params, result) VALUES (?,?,?,?,?,?,?)')
-      .run(this.now(), a.actor, a.ip, a.action, a.entityId, JSON.stringify(a.params ?? {}), a.result);
+  audit(a: { actor: string; userId?: string | null; ip: string | null; action: string; entityId: string | null; params?: Record<string, unknown>; result: string }): void {
+    this.db.prepare('INSERT INTO audit_log (ts, actor, user_id, ip, action, entity_id, params, result) VALUES (?,?,?,?,?,?,?,?)')
+      .run(this.now(), a.actor, a.userId ?? null, a.ip, a.action, a.entityId, JSON.stringify(a.params ?? {}), a.result);
   }
   listAudit(limit = 100): Raw[] {
     return this.db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(limit);

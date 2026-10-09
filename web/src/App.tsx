@@ -1,22 +1,34 @@
 import { useEffect, useMemo, useState } from 'react';
 import { computeSummary } from '@berrie/shared';
-import { useStore, deriveAlerts, type View } from './state/store';
-import { connectWs, refreshAuth } from './state/api';
+import { useStore, deriveAlerts, hasRole, type View } from './state/store';
+import { connectWs, refreshAuth, savePrefs } from './state/api';
 import { WorldView } from './ui/WorldView';
 import { ServicesView } from './ui/ServicesView';
 import { EventsView } from './ui/EventsView';
 import { AlertsView } from './ui/AlertsView';
 import { SettingsView } from './ui/SettingsView';
 import { Icon } from './ui/Icon';
-import { LoginGate } from './ui/LoginGate';
+import { AuthGate } from './ui/AuthGate';
+import { HomeView } from './ui/HomeView';
+import { AccountView } from './ui/AccountView';
+import { PeopleView } from './ui/PeopleView';
+import { Avatar } from './ui/Avatar';
 
-const TABS: { id: View; label: string; icon: string }[] = [
+const TABS: { id: View; label: string; icon: string; admin?: boolean }[] = [
+  { id: 'home', label: 'Home', icon: 'home' },
   { id: 'world', label: 'World', icon: 'globe' },
   { id: 'services', label: 'Services', icon: 'list' },
   { id: 'events', label: 'Events', icon: 'activity' },
   { id: 'alerts', label: 'Alerts', icon: 'alert' },
+  { id: 'people', label: 'People', icon: 'users', admin: true },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
+
+/** One-time links: #/invite/<token> and #/reset/<token>. */
+function linkToken(): { kind: 'invite' | 'reset'; value: string } | null {
+  const m = /^#\/(invite|reset)\/([A-Za-z0-9_-]{10,100})$/.exec(location.hash);
+  return m ? { kind: m[1] as 'invite' | 'reset', value: m[2] } : null;
+}
 
 export function App() {
   const view = useStore((s) => s.view);
@@ -30,19 +42,19 @@ export function App() {
   const daylight = useStore((s) => s.daylight);
   const setDaylight = useStore((s) => s.setDaylight);
 
-  const admin = useStore((s) => s.admin);
-  const authKnown = useStore((s) => s.authKnown);
-  const viewRequiresAuth = useStore((s) => s.viewRequiresAuth);
-  const gated = authKnown && viewRequiresAuth && !admin;
+  const me = useStore((s) => s.me);
+  const [token] = useState(linkToken);
+  const userId = me?.user?.id ?? null;
+  const gated = !me || !me.user || (!!token && !me.user);
   useEffect(() => { void refreshAuth(); }, []);
-  // (Re)connect whenever the sign-in state changes, so the world loads right after login.
-  useEffect(() => (authKnown && !gated ? connectWs() : undefined), [authKnown, gated, admin]);
+  // Connect only once signed in; reconnect if the account changes.
+  useEffect(() => (userId ? connectWs() : undefined), [userId]);
 
   // Deep links: #/e/<entity id> selects and focuses a building.
   const selectedId = useStore((s) => s.selectedId);
   const [linkHandled, setLinkHandled] = useState(false);
   useEffect(() => {
-    if (linkHandled || !loaded) return;
+    if (linkHandled || !loaded || token) return;
     setLinkHandled(true);
     const m = /^#\/e\/(.+)$/.exec(location.hash);
     if (m) {
@@ -73,7 +85,15 @@ export function App() {
   const [now, setNow] = useState(new Date());
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 15_000); return () => clearInterval(t); }, []);
 
-  if (gated) return <LoginGate />;
+  if (!me) return <div className="gate"><p className="muted">Connecting…</p></div>;
+  if (gated) return <AuthGate me={me} token={token} />;
+  const user = me.user!;
+  const isAdmin = hasRole(me, 'admin');
+  const cycleDaylight = () => {
+    const next = daylight === 'auto' ? 'day' : daylight === 'day' ? 'night' : 'auto';
+    setDaylight(next);
+    savePrefs({ daylight: next });
+  };
 
   return (
     <div className="app">
@@ -85,7 +105,7 @@ export function App() {
         </div>
         <div className={`status-line ${status.tone}`}><span className="dot" />{status.text}</div>
         <nav className="tabs" aria-label="Views">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !t.admin || isAdmin).map((t) => (
             <button key={t.id} className={`tab${view === t.id ? ' active' : ''}`} onClick={() => setView(t.id)}>
               <Icon name={t.icon} />{t.label}
               {t.id === 'alerts' && alerts.length > 0 && <span className={`badge ${alerts.some((a) => a.severity !== 'notice') ? 'bad' : 'warn'}`}>{alerts.length}</span>}
@@ -94,8 +114,11 @@ export function App() {
         </nav>
         <div className="top-right">
           <span className="clock"><Icon name="clock" />{now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}</span>
-          <button className="ghost-btn" onClick={() => setDaylight(daylight === 'auto' ? 'day' : daylight === 'day' ? 'night' : 'auto')} title="Toggle day/night (auto follows your local time)">
+          <button className="ghost-btn" onClick={cycleDaylight} title="Toggle day/night (auto follows your local time)">
             <Icon name={daylight === 'night' ? 'moon' : 'sun'} />{daylight === 'auto' ? 'Auto' : daylight === 'day' ? 'Day' : 'Night'}
+          </button>
+          <button className={`user-btn${view === 'account' ? ' active' : ''}`} onClick={() => setView('account')} title={`${user.displayName} — account & security`}>
+            <Avatar avatar={user.avatar} size={24} /><span className="uname">{user.displayName}</span>
           </button>
         </div>
       </header>
@@ -105,6 +128,9 @@ export function App() {
         {view === 'events' && <EventsView />}
         {view === 'alerts' && <AlertsView alerts={alerts} />}
         {view === 'settings' && <SettingsView />}
+        {view === 'home' && <HomeView alerts={alerts} />}
+        {view === 'account' && <AccountView />}
+        {view === 'people' && isAdmin && <PeopleView />}
       </main>
     </div>
   );

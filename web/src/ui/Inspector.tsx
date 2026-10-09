@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { EntityView, WorldEvent } from '@berrie/shared';
 import { HEALTH_LABEL, LIFECYCLE_LABEL, effectiveHealth } from '@berrie/shared';
-import { useStore } from '../state/store';
-import { api, ApiError } from '../state/api';
+import { useStore, useRole } from '../state/store';
+import { api, ApiError, toggleFavorite } from '../state/api';
 import { Icon } from './Icon';
 import { HEALTH_COLOR, TYPE_LABEL, fmtBytes, fmtTime, iconSvg, statusText, timeAgo } from './status';
 import { describeEvent, eventColor } from './events';
@@ -33,7 +33,8 @@ export function Inspector({ entity: e, onClose }: { entity: EntityView; onClose:
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(e.displayName);
   const entities = useStore((s) => s.entities);
-  const admin = useStore((s) => s.admin);
+  const admin = useRole('operator');
+  const isFavorite = useStore((s) => s.favorites.includes(e.id));
   const offset = useStore((s) => s.serverOffsetMs);
   const select = useStore((s) => s.select);
 
@@ -98,6 +99,7 @@ export function Inspector({ entity: e, onClose }: { entity: EntityView; onClose:
           <div className="sub">{TYPE_LABEL[e.buildingType]} · {e.kind}{host && host.id !== e.id ? ` · ${host.displayName}` : ''}</div>
         </div>
         <span className="pill" style={{ '--c': st.color } as React.CSSProperties}><span className="dot" />{st.text}</span>
+        <button className={`icon-btn fav${isFavorite ? ' on' : ''}`} onClick={() => void toggleFavorite(e.id)} title={isFavorite ? 'Remove from my favorites' : 'Add to my favorites (personal)'}><Icon name="star" /></button>
         <button className="icon-btn" onClick={onClose} title="Close (Esc)"><Icon name="x" /></button>
       </div>
 
@@ -276,7 +278,7 @@ function MetricsTab({ e, runtime, detail }: { e: EntityView; runtime: Runtime | 
 }
 
 function LogsTab({ e }: { e: EntityView }) {
-  const admin = useStore((s) => s.admin);
+  const admin = useRole('operator');
   const [lines, setLines] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const load = () => {
@@ -285,7 +287,7 @@ function LogsTab({ e }: { e: EntityView }) {
   };
   useEffect(() => { if (admin && e.meta.containerId) load(); }, [e.id, admin]);
   if (!e.meta.containerId) return <p className="muted">No container logs for this entity.</p>;
-  if (!admin) return <p className="muted"><Icon name="lock" size={14} /> Logs can contain sensitive data and require an admin session. Sign in under Settings.</p>;
+  if (!admin) return <p className="muted"><Icon name="lock" size={14} /> Logs can contain sensitive data and are available to operators and administrators.</p>;
   return (
     <section>
       <div className="row-between"><h4>Last 200 lines (secrets redacted)</h4><button onClick={load}><Icon name="restart" size={14} />Refresh</button></div>
