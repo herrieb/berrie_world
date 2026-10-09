@@ -13,6 +13,8 @@ import { HomeView } from './ui/HomeView';
 import { AccountView } from './ui/AccountView';
 import { PeopleView } from './ui/PeopleView';
 import { HarborView } from './ui/HarborView';
+import { IncidentsView } from './ui/IncidentsView';
+import { NotificationBell } from './ui/NotificationBell';
 import { Avatar } from './ui/Avatar';
 
 const TABS: { id: View; label: string; icon: string; admin?: boolean }[] = [
@@ -21,6 +23,7 @@ const TABS: { id: View; label: string; icon: string; admin?: boolean }[] = [
   { id: 'services', label: 'Services', icon: 'list' },
   { id: 'events', label: 'Events', icon: 'activity' },
   { id: 'alerts', label: 'Alerts', icon: 'alert' },
+  { id: 'incidents', label: 'Incidents', icon: 'flame' },
   { id: 'harbor', label: 'Harbor', icon: 'anchor', admin: true },
   { id: 'people', label: 'People', icon: 'users', admin: true },
   { id: 'settings', label: 'Settings', icon: 'settings' },
@@ -45,6 +48,7 @@ export function App() {
   const setDaylight = useStore((s) => s.setDaylight);
 
   const me = useStore((s) => s.me);
+  const incidentsMap = useStore((s) => s.incidents);
   const [token] = useState(linkToken);
   const userId = me?.user?.id ?? null;
   const gated = !me || !me.user || (!!token && !me.user);
@@ -90,6 +94,7 @@ export function App() {
   if (!me) return <div className="gate"><p className="muted">Connecting…</p></div>;
   if (gated) return <AuthGate me={me} token={token} />;
   const user = me.user!;
+  const openIncidents = Object.values(incidentsMap).filter((i) => i.status === 'open').length;
   const isAdmin = hasRole(me, 'admin');
   const cycleDaylight = () => {
     const next = daylight === 'auto' ? 'day' : daylight === 'day' ? 'night' : 'auto';
@@ -108,9 +113,10 @@ export function App() {
         <div className={`status-line ${status.tone}`}><span className="dot" />{status.text}</div>
         <nav className="tabs" aria-label="Views">
           {TABS.filter((t) => !t.admin || isAdmin).map((t) => (
-            <button key={t.id} className={`tab${view === t.id ? ' active' : ''}`} onClick={() => setView(t.id)}>
+            <button key={t.id} className={`tab${view === t.id ? ' active' : ''}`} onClick={() => setView(t.id)} title={t.label} aria-label={t.label}>
               <Icon name={t.icon} />{t.label}
               {t.id === 'alerts' && alerts.length > 0 && <span className={`badge ${alerts.some((a) => a.severity !== 'notice') ? 'bad' : 'warn'}`}>{alerts.length}</span>}
+              {t.id === 'incidents' && openIncidents > 0 && <span className="badge bad">{openIncidents}</span>}
             </button>
           ))}
         </nav>
@@ -119,6 +125,7 @@ export function App() {
           <button className="ghost-btn" onClick={cycleDaylight} title="Toggle day/night (auto follows your local time)">
             <Icon name={daylight === 'night' ? 'moon' : 'sun'} />{daylight === 'auto' ? 'Auto' : daylight === 'day' ? 'Day' : 'Night'}
           </button>
+          <NotificationBell />
           <button className={`user-btn${view === 'account' ? ' active' : ''}`} onClick={() => setView('account')} title={`${user.displayName} — account & security`}>
             <Avatar avatar={user.avatar} size={24} /><span className="uname">{user.displayName}</span>
           </button>
@@ -134,6 +141,7 @@ export function App() {
         {view === 'account' && <AccountView />}
         {view === 'people' && isAdmin && <PeopleView />}
         {view === 'harbor' && isAdmin && <HarborView />}
+        {view === 'incidents' && <IncidentsView />}
       </main>
     </div>
   );

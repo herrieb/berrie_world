@@ -74,6 +74,11 @@ export class Scheduler {
     this.timers.push(setInterval(() => void this.monitorTick(), 5000));
     this.timers.push(setInterval(() => this.retention(), 3600_000));
     if (!this.demo) this.timers.push(setInterval(() => void this.hosts.collectTick(), 5000));
+    if (!this.demo && this.cfg.metrics.containerIntervalSeconds > 0) this.timers.push(setInterval(() => void this.containerMetrics(), this.cfg.metrics.containerIntervalSeconds * 1000));
+    if (!this.demo && this.cfg.metrics.tlsIntervalHours > 0) {
+      this.timers.push(setInterval(() => void this.tlsTick(), this.cfg.metrics.tlsIntervalHours * 3600_000));
+      setTimeout(() => void this.tlsTick(), 60_000).unref();
+    }
     if (this.demo) this.timers.push(setInterval(() => this.demo!.tickActivity(this.world), 2500));
     for (const t of this.timers) t.unref();
   }
@@ -229,12 +234,53 @@ export class Scheduler {
       return;
     }
     const unknown = r.outcome === 'fail' && (!canaryOk || r.localError);
+    if (r.outcome === 'ok' && c.check.type === 'http') this.world.repo.hosts.insertMetrics(c.entityId, 'monitor', new Date().toISOString(), [{ metric: 'latency', value: r.latencyMs }]);
     this.world.recordProbe(c.entityId, {
       checkName: c.name, outcome: unknown ? 'unknown' : r.outcome, failHealth: r.severity,
       reason: unknown ? `monitor could not run check (${r.reason})` : r.reason,
       latencyMs: r.latencyMs, statusCode: r.statusCode,
       failureThreshold: c.check.failureThreshold, successThreshold: c.check.successThreshold,
     });
+  }
+
+  /** Container CPU/memory samples for running containers (Docker stats), bounded concurrency. */
+  async containerMetrics(): Promise<void> {
+    if (this.stopped) return;
+    const jobs: { entityId: string; host: string; run: () => Promise<{ cpuPercent: number | null; memBytes: number | null }> }[] = [];
+    for (const [host, d] of this.docker) {
+      for (const [cid, info] of d.containers) {
+        const e = this.world.repo.getEntity(info.entityId);
+        if (e?.meta.state === 'running') jobs.push({ entityId: e.id, host, run: () => d.metrics(cid) });
+      }
+    }
+    const worker = async () => {
+      for (let j = jobs.shift(); j; j = jobs.shift()) {
+        try {
+          const m = await j.run();
+          const samples = [...(m.cpuPercent != null ? [{ metric: 'cpu.pct', value: m.cpuPercent }] : []), ...(m.memBytes != null ? [{ metric: 'mem.bytes', value: m.memBytes }] : [])];
+          if (samples.length) this.world.repo.hosts.insertMetrics(j.entityId, `docker:${j.host}`, new Date().toISOString(), samples);
+        } catch { /* a failed sample is simply absent — never stored as zero */ }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+  }
+
+  /** Certificate expiry of public HTTPS endpoints. Failure to check is recorded as such, never as an expiry. */
+  async tlsTick(): Promise<void> {
+    if (this.stopped) return;
+    const { checkTls } = await import('../adapters/probes.js');
+    for (const e of this.world.repo.listEntities().filter((x) => x.kind === 'endpoint' && x.lifecycle !== 'removed')) {
+      const host = e.hostnames[0];
+      if (!host) continue;
+      const r = await checkTls(host);
+      const checkedAt = new Date().toISOString();
+      if ('error' in r) {
+        this.world.patchMeta(e.id, { tls: { status: 'unavailable', error: r.error, checkedAt } });
+      } else {
+        this.world.repo.hosts.insertMetrics(e.id, 'tls', checkedAt, [{ metric: 'tls.days_left', value: r.daysLeft }]);
+        this.world.patchMeta(e.id, { tls: { status: 'confirmed', expiresAt: r.expiresAt, daysLeft: r.daysLeft, issuer: r.issuer, checkedAt } });
+      }
+    }
   }
 
   checkList(): { entityId: string; name: string; intervalSeconds: number; nextAt: string }[] {

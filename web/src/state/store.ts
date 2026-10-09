@@ -1,11 +1,15 @@
 import { create } from 'zustand';
 import type {
-  AdapterStatus, Alert, BlockView, BuildingType, ConnectionView, EntityView, Health, HostnameHint, ImpactReport, Me, Origin, Role, SavedView, ServerMessage, Severity, UserPrefs, WorldEvent,
+  AdapterStatus, Alert, AlertAck, BlockView, BuildingType, ConnectionView, EntityView, Health, HostnameHint, ImpactReport, IncidentView, MaintenanceWindow,
+  Me, NotificationView, Origin, Role, SavedView, ServerMessage, Severity, UserPrefs, WorldEvent,
 } from '@berrie/shared';
-import { ROLE_RANK, effectiveHealth } from '@berrie/shared';
+import { ROLE_RANK, effectiveHealth, inMaintenance } from '@berrie/shared';
 
-export type View = 'home' | 'world' | 'services' | 'events' | 'alerts' | 'settings' | 'account' | 'people' | 'harbor';
-export const VIEWS: View[] = ['home', 'world', 'services', 'events', 'alerts', 'settings', 'account', 'people', 'harbor'];
+export type View = 'home' | 'world' | 'services' | 'events' | 'alerts' | 'incidents' | 'settings' | 'account' | 'people' | 'harbor';
+export const VIEWS: View[] = ['home', 'world', 'services', 'events', 'alerts', 'incidents', 'settings', 'account', 'people', 'harbor'];
+
+/** Incident replay on the map: health per entity at the scrubbed moment. */
+export interface Replay { incidentId: string; from: string; to: string; t: number; entities: string[]; initial: Record<string, Health | null>; events: WorldEvent[] }
 export type Daylight = 'auto' | 'day' | 'night';
 
 export interface Filters {
@@ -26,6 +30,12 @@ interface State {
   selectedConnection: string | null;
   /** Impact overlay shown on the map (real analysis or a simulation). */
   impact: ImpactReport | null;
+  incidents: Record<string, IncidentView>;
+  acks: AlertAck[];
+  maintenance: MaintenanceWindow[];
+  notifications: NotificationView[];
+  replay: Replay | null;
+  selectedIncident: string | null;
   blocks: BlockView[];
   adapters: AdapterStatus[];
   hints: HostnameHint[];
@@ -53,6 +63,9 @@ interface State {
   setMe: (me: Me) => void;
   selectConnection: (id: string | null) => void;
   setImpact: (r: ImpactReport | null) => void;
+  setNotifications: (n: NotificationView[]) => void;
+  setReplay: (r: Replay | null) => void;
+  selectIncident: (id: string | null) => void;
   setPersonal: (p: { prefs?: UserPrefs; favorites?: string[]; savedViews?: SavedView[] }) => void;
   setWs: (s: State['ws']) => void;
 }
@@ -72,6 +85,12 @@ export const useStore = create<State>((set) => ({
   connections: {},
   selectedConnection: null,
   impact: null,
+  incidents: {},
+  acks: [],
+  maintenance: [],
+  notifications: [],
+  replay: null,
+  selectedIncident: null,
   blocks: [],
   adapters: [],
   hints: [],
@@ -94,6 +113,7 @@ export const useStore = create<State>((set) => ({
           loaded: true, mode: m.data.mode, connected: m.data.connected, actionsEnabled: m.data.actionsEnabled,
           entities: Object.fromEntries(m.data.entities.map((e) => [e.id, e])), blocks: m.data.blocks,
           connections: Object.fromEntries((m.data.connections ?? []).map((c) => [c.id, c])),
+          incidents: Object.fromEntries((m.data.incidents ?? []).map((i) => [i.id, i])), acks: m.data.acks ?? [], maintenance: m.data.maintenance ?? [],
           adapters: m.data.adapters, hints: m.data.hints, events: m.data.recentEvents,
           serverOffsetMs: Date.parse(m.data.serverTime) - Date.now(),
         };
@@ -116,6 +136,14 @@ export const useStore = create<State>((set) => ({
         return { adapters: m.data, connected: s.connected || m.data.some((a) => a.lastCompleteAt && a.adapter !== 'config') };
       case 'hints':
         return { hints: m.data };
+      case 'incident':
+        return { incidents: { ...s.incidents, [m.data.id]: m.data } };
+      case 'ack':
+        return { acks: [m.data, ...s.acks.filter((a) => !(a.entityId === m.data.entityId && a.since === m.data.since))] };
+      case 'maintenance':
+        return { maintenance: [m.data, ...s.maintenance.filter((w) => w.id !== m.data.id)].filter((w) => !w.cancelledAt && Date.parse(w.endsAt) > Date.now()) };
+      case 'notification':
+        return { notifications: [m.data, ...s.notifications].slice(0, 100) };
       case 'connection': {
         const connections = { ...s.connections };
         if (m.data.lifecycle === 'archived') delete connections[m.data.id];
@@ -134,6 +162,9 @@ export const useStore = create<State>((set) => ({
   setMe: (me) => set({ me }),
   selectConnection: (selectedConnection) => set({ selectedConnection, ...(selectedConnection ? { selectedId: null } : {}) }),
   setImpact: (impact) => set({ impact }),
+  setNotifications: (notifications) => set({ notifications }),
+  setReplay: (replay) => set({ replay }),
+  selectIncident: (selectedIncident) => set({ selectedIncident }),
   setPersonal: (p) => set((s) => ({
     prefs: p.prefs ?? s.prefs, favorites: p.favorites ?? s.favorites, savedViews: p.savedViews ?? s.savedViews,
     daylight: p.prefs?.daylight ?? s.daylight,
@@ -155,10 +186,24 @@ export function hasBuilding(e: EntityView): boolean {
   return !!e.layout && e.lifecycle !== 'archived';
 }
 
+export interface AlertExtras { acked: AlertAck | null; maintenance: MaintenanceWindow | null }
+
+/** Acknowledgement applies to one specific state change (the alert's `since`). */
+export function alertExtras(a: Alert, acks: AlertAck[], windows: MaintenanceWindow[], entities: Record<string, EntityView>): AlertExtras {
+  const e = entities[a.entityId];
+  return { acked: acks.find((k) => k.entityId === a.entityId && k.since === a.since) ?? null, maintenance: e ? inMaintenance(windows, e) : null };
+}
+
 export function deriveAlerts(entities: EntityView[]): Alert[] {
   const out: Alert[] = [];
   for (const e of entities) {
     if (e.kind === 'project' || e.lifecycle === 'archived' || e.lifecycle === 'removed') continue;
+    // Certificate expiry, only from a real check of the presented certificate.
+    const tls = e.meta.tls as { status?: string; daysLeft?: number; checkedAt?: string } | undefined;
+    if (tls?.status === 'confirmed' && typeof tls.daysLeft === 'number' && tls.daysLeft < 14) {
+      out.push({ entityId: e.id, displayName: e.displayName, health: e.health, lifecycle: e.lifecycle, severity: tls.daysLeft < 3 ? 'warning' : 'notice',
+        reason: tls.daysLeft < 0 ? 'TLS certificate has expired' : `TLS certificate expires in ${tls.daysLeft} day(s)`, since: tls.checkedAt ?? null });
+    }
     const h = effectiveHealth(e);
     let severity: Severity | null = null;
     if (e.kind === 'host' && h === 'host_offline') severity = 'critical';

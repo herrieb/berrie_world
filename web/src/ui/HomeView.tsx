@@ -94,6 +94,25 @@ export function HomeView({ alerts }: { alerts: Alert[] }) {
         </section>
 
         <section className="card">
+          <h3><Icon name="flame" /> Unresolved incidents</h3>
+          {(() => {
+            const open = Object.values(s.incidents).filter((i) => i.status !== 'resolved').sort((a, b) => (b.assignee?.id === user.id ? 1 : 0) - (a.assignee?.id === user.id ? 1 : 0));
+            if (!open.length) return <p className="muted small">No open incidents.</p>;
+            return (
+              <div className="list">
+                {open.slice(0, 6).map((i) => (
+                  <button key={i.id} className="entity-row" onClick={() => { s.selectIncident(i.id); s.setView('incidents'); }}>
+                    <span className={`sev ${i.severity}`}>{i.severity}</span>
+                    <span className="grow">{i.title}<small>{i.status === 'monitoring' ? 'recovered — needs confirmation' : 'open'}{i.assignee ? ` · ${i.assignee.id === user.id ? 'assigned to you' : i.assignee.name}` : ' · unassigned'}</small></span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+          {s.maintenance.some((w) => Date.parse(w.startsAt) <= Date.now()) && <p className="small muted"><Icon name="wrench" size={11} /> {s.maintenance.filter((w) => Date.parse(w.startsAt) <= Date.now()).length} maintenance window(s) active</p>}
+        </section>
+
+        <section className="card">
           <h3><Icon name="star" /> Favorite islands</h3>
           {!favIslands.length ? <p className="muted small">Star an island in the world to pin it here.</p> : <div className="list">{favIslands.map((e) => <EntityRowLink key={e.id} e={e} />)}</div>}
           <div className="quick-add">

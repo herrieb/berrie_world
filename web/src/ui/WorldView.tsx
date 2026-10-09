@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Alert, Biome, BuildingType, Summary } from '@berrie/shared';
+import type { Alert, Biome, BuildingType, Health, Summary } from '@berrie/shared';
+import { inMaintenance } from '@berrie/shared';
 import { useStore, matchesFilters, filtersActive, useRole } from '../state/store';
 import { onServerMessage, api, savePrefs } from '../state/api';
 import { WorldRenderer } from '../world/WorldRenderer';
@@ -48,6 +49,19 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
 
   const matching = useMemo(() => (filtersActive(s.filters) ? new Set(list.filter((e) => matchesFilters(e, s.filters)).map((e) => e.id)) : null), [list, s.filters]);
 
+  const replayHealth = useMemo(() => {
+    const r = s.replay;
+    if (!r) return null;
+    const m = new Map<string, Health>();
+    for (const id of r.entities) m.set(id, r.initial[id] ?? 'unknown');
+    for (const ev of r.events) {
+      if (Date.parse(ev.ts) > r.t || !ev.entityId) continue;
+      const to = (ev.details.to as Health | undefined) ?? (ev.type === 'host.offline' ? 'host_offline' : ev.type === 'host.online' || ev.type === 'service.recovered' ? 'healthy' : undefined);
+      if (to) m.set(ev.entityId, to);
+    }
+    return m;
+  }, [s.replay]);
+  const maintenanceSet = useMemo(() => new Set(list.filter((e) => inMaintenance(s.maintenance, e)).map((e) => e.id)), [list, s.maintenance]);
   const connList = useMemo(() => Object.values(s.connections), [s.connections]);
   const impactMap = useMemo(() => (s.impact ? new Map(s.impact.items.map((i) => [i.entityId, i.class])) : null), [s.impact]);
   const biomes = useMemo(() => Object.fromEntries(list.filter((e) => e.kind === 'host' && (e.meta.appearance as { biome?: string } | undefined)?.biome).map((e) => [e.id, (e.meta.appearance as { biome: Biome }).biome])), [list]);
@@ -58,9 +72,9 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       entities: list, blocks: s.blocks, selectedId: s.selectedId, matching, daylight: s.daylight, editLayout: s.editLayout,
       labelDensity: s.prefs.labelDensity ?? 'auto', initialCamera: s.prefs.camera ?? null,
       offsets: s.prefs.islandOffsets ?? {}, biomes, arrangeIslands: arrange,
-      connections: connList, selectedConnection: s.selectedConnection, impact: impactMap,
+      connections: connList, selectedConnection: s.selectedConnection, impact: impactMap, replayHealth, maintenance: maintenanceSet,
     });
-  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera, s.prefs.islandOffsets, biomes, arrange, connList, s.selectedConnection, impactMap]);
+  }, [ready, list, s.blocks, s.selectedId, matching, s.daylight, s.editLayout, s.prefs.labelDensity, s.prefs.camera, s.prefs.islandOffsets, biomes, arrange, connList, s.selectedConnection, impactMap, replayHealth, maintenanceSet]);
 
   useEffect(() => { if (ready && s.selectedId && s.focusTick) rendererRef.current?.focus(s.selectedId); }, [s.focusTick, ready]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
@@ -148,6 +162,24 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       )}
       {s.editLayout && <div className="edit-banner">Layout editor: drag a building to a free spot. Positions are saved and pinned.<button onClick={() => s.setEditLayout(false)}>Done</button></div>}
       {toast && <div className="toast">{toast}</div>}
+      {s.replay && (() => {
+        const r = s.replay;
+        const t0 = Date.parse(r.from), t1 = Date.parse(r.to);
+        const inc = s.incidents[r.incidentId];
+        const recent = r.events.filter((e) => Date.parse(e.ts) <= r.t).slice(-1)[0];
+        return (
+          <div className="replay-bar card">
+            <b><Icon name="history" /> Replay{inc ? `: ${inc.title}` : ''}</b>
+            <input type="range" min={t0} max={t1} step={Math.max(1000, Math.round((t1 - t0) / 400))} value={r.t} onChange={(e) => s.setReplay({ ...r, t: Number(e.target.value) })} aria-label="Replay time" />
+            <span className="mono">{new Date(r.t).toLocaleString([], { hourCycle: 'h23' })}</span>
+            <div className="row">
+              {r.events.map((e) => <button key={e.id} className={`tick${Date.parse(e.ts) <= r.t ? ' past' : ''}`} title={`${new Date(e.ts).toLocaleTimeString([], { hourCycle: 'h23' })} ${e.type}`} style={{ left: `${((Date.parse(e.ts) - t0) / Math.max(1, t1 - t0)) * 100}%` }} onClick={() => s.setReplay({ ...r, t: Date.parse(e.ts) })} />)}
+            </div>
+            <small className="muted">{recent ? `last change: ${recent.type.replace('service.', '').replace('host.', 'host ')} — ${s.entities[recent.entityId ?? '']?.displayName ?? recent.entityId}` : 'state at the start of the incident'} · showing recorded states only</small>
+            <button onClick={() => s.setReplay(null)}>Exit replay</button>
+          </div>
+        );
+      })()}
 
       <aside className="sidepanel">
         {selected ? <Inspector entity={selected} onClose={() => s.select(null)} />

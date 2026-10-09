@@ -1,4 +1,4 @@
-import type { Me, SavedView, ServerMessage, UserPrefs } from '@berrie/shared';
+import type { Me, NotificationView, SavedView, ServerMessage, UserPrefs } from '@berrie/shared';
 import { useStore } from './store';
 
 export class ApiError extends Error {
@@ -30,12 +30,14 @@ export async function refreshAuth(): Promise<Me | null> {
 /** Personal state lives on the server so it follows the user across devices. */
 export async function loadPersonal(): Promise<void> {
   try {
-    const [p, f, v] = await Promise.all([
+    const [p, f, v, n] = await Promise.all([
       api<{ prefs: UserPrefs }>('/api/account/prefs'),
       api<{ favorites: string[] }>('/api/account/favorites'),
       api<{ views: SavedView[] }>('/api/account/views'),
+      api<{ notifications: NotificationView[] }>('/api/notifications'),
     ]);
     useStore.getState().setPersonal({ prefs: p.prefs, favorites: f.favorites, savedViews: v.views });
+    useStore.getState().setNotifications(n.notifications);
   } catch { /* keep defaults */ }
 }
 
@@ -88,6 +90,7 @@ export function connectWs(): () => void {
       try {
         const m = JSON.parse(ev.data as string) as ServerMessage;
         useStore.getState().apply(m);
+        if (m.t === 'notification') browserNotify(m.data);
         for (const l of listeners) l(m);
       } catch { /* ignore malformed */ }
     };
@@ -102,4 +105,12 @@ export function connectWs(): () => void {
   };
   open();
   return () => { stopped = true; window.clearTimeout(timer); ws?.close(); };
+}
+
+/** Browser notification for a new personal notification, if the user enabled it and granted permission. */
+function browserNotify(n: NotificationView): void {
+  try {
+    if (!useStore.getState().prefs.notifications?.browser || !('Notification' in window) || Notification.permission !== 'granted') return;
+    new Notification(n.title, { body: n.text ?? undefined, tag: n.incidentId ?? n.id });
+  } catch { /* unsupported */ }
 }

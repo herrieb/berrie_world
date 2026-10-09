@@ -339,6 +339,87 @@ export const MIGRATIONS: Migration[] = [
       DELETE FROM entities WHERE kind IN ('gateway','external');
     `,
   },
+  {
+    version: 5,
+    name: 'incidents, acknowledgements, maintenance and notifications',
+    up: `
+      CREATE TABLE incidents (
+        id                   TEXT PRIMARY KEY,
+        title                TEXT NOT NULL,
+        status               TEXT NOT NULL CHECK (status IN ('open','monitoring','resolved')),
+        severity             TEXT NOT NULL,
+        root_entity_id       TEXT,                 -- where it started (not a verified cause)
+        hypothesis           TEXT,                 -- suggested cause, always labelled a hypothesis unless verified
+        hypothesis_entity_id TEXT,
+        hypothesis_verified  INTEGER NOT NULL DEFAULT 0,
+        assignee             TEXT,                 -- user id
+        created_by           TEXT NOT NULL,        -- 'system' or a user id
+        opened_at            TEXT NOT NULL,
+        recovered_at         TEXT,
+        resolved_at          TEXT,
+        resolved_by          TEXT,
+        updated_at           TEXT NOT NULL
+      );
+      CREATE INDEX idx_incidents_status ON incidents(status, opened_at);
+      CREATE TABLE incident_entities (
+        incident_id  TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+        entity_id    TEXT NOT NULL,
+        role         TEXT NOT NULL CHECK (role IN ('affected','suspected','impact')),
+        added_at     TEXT NOT NULL,
+        PRIMARY KEY (incident_id, entity_id)
+      );
+      CREATE INDEX idx_incident_entities_entity ON incident_entities(entity_id);
+      CREATE TABLE incident_timeline (
+        id           TEXT PRIMARY KEY,
+        incident_id  TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+        ts           TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        actor        TEXT NOT NULL,                -- 'system' or a username (kept even if the user is removed)
+        user_id      TEXT,
+        text         TEXT NOT NULL,
+        data         TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE INDEX idx_incident_timeline ON incident_timeline(incident_id, ts);
+      -- Acknowledging an alert applies to one specific state change (entity + since), so a new failure alerts again.
+      CREATE TABLE alert_acks (
+        entity_id  TEXT NOT NULL,
+        since      TEXT NOT NULL,
+        actor      TEXT NOT NULL,
+        user_id    TEXT,
+        ts         TEXT NOT NULL,
+        note       TEXT,
+        PRIMARY KEY (entity_id, since)
+      );
+      CREATE TABLE maintenance (
+        id            TEXT PRIMARY KEY,
+        title         TEXT NOT NULL,
+        description   TEXT,
+        entity_ids    TEXT NOT NULL,               -- JSON; a host id covers everything on that host
+        starts_at     TEXT NOT NULL,
+        ends_at       TEXT NOT NULL,
+        suppress      INTEGER NOT NULL DEFAULT 1,  -- suppress incidents/notifications; raw health is never hidden
+        created_by    TEXT NOT NULL,
+        created_at    TEXT NOT NULL,
+        cancelled_at  TEXT
+      );
+      CREATE TABLE notifications (
+        id           TEXT PRIMARY KEY,
+        user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ts           TEXT NOT NULL,
+        severity     TEXT NOT NULL,
+        title        TEXT NOT NULL,
+        text         TEXT,
+        entity_id    TEXT,
+        incident_id  TEXT,
+        read_at      TEXT
+      );
+      CREATE INDEX idx_notifications_user ON notifications(user_id, ts);
+    `,
+    down: `
+      DROP TABLE notifications; DROP TABLE maintenance; DROP TABLE alert_acks;
+      DROP TABLE incident_timeline; DROP TABLE incident_entities; DROP TABLE incidents;
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database, target = MIGRATIONS.at(-1)!.version): void {

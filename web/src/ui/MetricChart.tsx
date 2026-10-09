@@ -5,11 +5,11 @@ import { fmtBytes } from './status';
 
 const RANGES = ['1h', '6h', '24h', '7d', '30d'] as const;
 const LABEL: Record<string, string> = {
-  'cpu.pct': 'CPU busy %', 'mem.pct': 'Memory used %', 'mem.used': 'Memory used', 'load1': 'Load (1 min)', 'uptime': 'Uptime (s)',
+  'cpu.pct': 'CPU busy %', 'mem.pct': 'Memory used %', 'mem.used': 'Memory used', 'mem.bytes': 'Memory (container)', 'load1': 'Load (1 min)', 'uptime': 'Uptime (s)',
   'net.rx_bps': 'Network in', 'net.tx_bps': 'Network out', 'latency': 'Response time (ms)', 'tls.days_left': 'TLS certificate days left',
 };
 const label = (m: string) => LABEL[m] ?? (m.startsWith('disk.pct:') ? `Disk used % (${m.slice(9)})` : m);
-const fmt = (m: string, v: number) => (m === 'mem.used' ? fmtBytes(v) : m.startsWith('net.') ? `${fmtBytes(v)}/s` : m.endsWith('pct') || m.startsWith('disk.pct') ? `${Math.round(v * 10) / 10}%` : String(Math.round(v * 100) / 100));
+const fmt = (m: string, v: number) => (m === 'mem.used' || m === 'mem.bytes' ? fmtBytes(v) : m.startsWith('net.') ? `${fmtBytes(v)}/s` : m.endsWith('pct') || m.startsWith('disk.pct') ? `${Math.round(v * 10) / 10}%` : m === 'latency' ? `${Math.round(v)} ms` : String(Math.round(v * 100) / 100));
 
 /** History chart for one entity. Shows nothing invented: too few samples → says so instead of drawing. */
 export function MetricChart({ entityId }: { entityId: string }) {

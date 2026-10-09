@@ -11,6 +11,7 @@ import { migrate } from './migrations.js';
 import { Users } from './users.js';
 import { HostRegistry } from './hosts.js';
 import { ConnectionStore } from './connections.js';
+import { OpsStore } from './ops.js';
 
 export interface EntityRow {
   id: string;
@@ -123,6 +124,7 @@ export class Repo {
   readonly users: Users;
   readonly hosts: HostRegistry;
   readonly connections: ConnectionStore;
+  readonly ops: OpsStore;
 
   constructor(
     path: string,
@@ -138,6 +140,7 @@ export class Repo {
     this.users = new Users(this.db, () => this.now());
     this.hosts = new HostRegistry(this.db, () => this.now());
     this.connections = new ConnectionStore(this.db, () => this.now());
+    this.ops = new OpsStore(this.db, () => this.now());
     // A database belongs to exactly one mode; refuse to open the live DB in demo mode or vice versa.
     const stored = this.getSetting('origin');
     if (!stored) this.setSetting('origin', mode);

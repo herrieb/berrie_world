@@ -686,9 +686,9 @@ export function glowCanvas(color: string, size = 64): HTMLCanvasElement {
 }
 
 /** Floating marker sign: '!' warning, '?' unknown/missing, '✓' recovery. */
-export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline' | 'pressure'): HTMLCanvasElement {
+export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline' | 'pressure' | 'maintenance'): HTMLCanvasElement {
   const px = new Px(13, 17);
-  const bg = kind === 'warn' ? hex(0xef4b4b) : kind === 'ok' ? hex(0x3fd17a) : kind === 'offline' ? hex(0xa58bff) : kind === 'pressure' ? hex(0xf08a3c) : hex(0x8a94a6);
+  const bg = kind === 'warn' ? hex(0xef4b4b) : kind === 'ok' ? hex(0x3fd17a) : kind === 'offline' ? hex(0xa58bff) : kind === 'pressure' ? hex(0xf08a3c) : kind === 'maintenance' ? hex(0x4aa8ff) : hex(0x8a94a6);
   for (let y = 0; y < 13; y++) for (let x = 0; x < 13; x++) {
     if (Math.abs(x - 6) + Math.abs(y - 6) <= 6) px.set(x, y, Math.abs(x - 6) + Math.abs(y - 6) === 6 ? shade(bg, 0.6) : bg);
   }
@@ -696,6 +696,7 @@ export function markerArt(kind: 'warn' | 'missing' | 'ok' | 'offline' | 'pressur
   if (kind === 'warn') { px.rect(6, 3, 1, 5, W); px.rect(6, 9, 1, 1, W); }
   else if (kind === 'missing') { px.rect(5, 3, 3, 1, W); px.rect(8, 4, 1, 2, W); px.rect(6, 6, 2, 1, W); px.rect(6, 7, 1, 1, W); px.rect(6, 9, 1, 1, W); }
   else if (kind === 'ok') { px.set(4, 6, W); px.set(5, 7, W); px.set(6, 8, W); px.set(7, 7, W); px.set(8, 6, W); px.set(9, 5, W); }
+  else if (kind === 'maintenance') { px.rect(4, 4, 2, 2, W); px.set(5, 6, W); px.set(6, 7, W); px.set(7, 8, W); px.rect(8, 8, 2, 2, W); } // wrench
   else if (kind === 'pressure') { px.rect(4, 8, 1, 2, W); px.rect(6, 6, 1, 4, W); px.rect(8, 3, 1, 7, W); } // rising bars: resource pressure
   else { px.rect(4, 5, 5, 1, W); px.rect(4, 7, 5, 1, W); }
   px.rect(6, 13, 1, 4, hex(0x3a3f4c));

@@ -267,12 +267,10 @@ function MetricsTab({ e, runtime, detail }: { e: EntityView; runtime: Runtime | 
   const maxLat = Math.max(50, ...checks.map((c) => c.latency_ms ?? 0));
   return (
     <>
-      {e.kind !== 'service' && (
-        <section>
-          <h4>History</h4>
-          <MetricChart entityId={e.id} />
-        </section>
-      )}
+      <section>
+        <h4>History</h4>
+        <MetricChart entityId={e.id} />
+      </section>
       <section>
         <h4>Live container metrics</h4>
         {e.kind !== 'service' ? <p className="muted">Not a container.</p> : !runtime ? <p className="muted">Loading…</p> : !runtime.available ? <p className="muted">Unavailable: {runtime.reason}</p> : (

@@ -1,4 +1,5 @@
 import net from 'node:net';
+import tls from 'node:tls';
 import type { CheckConfig } from '../config.js';
 import { redactError } from '../core/redact.js';
 
@@ -69,4 +70,20 @@ export function tcpProbe(c: CheckConfig): Promise<ProbeResult> {
 
 export function runProbe(c: CheckConfig): Promise<ProbeResult> {
   return c.type === 'tcp' ? tcpProbe(c) : httpProbe(c);
+}
+
+/** Read the certificate a public hostname presents (SNI), without sending any request. */
+export function checkTls(hostname: string, port = 443, timeoutMs = 8000): Promise<{ expiresAt: string; daysLeft: number; issuer: string | null } | { error: string }> {
+  return new Promise((resolve) => {
+    const sock = tls.connect({ host: hostname, port, servername: hostname, rejectUnauthorized: false, timeout: timeoutMs }, () => {
+      const cert = sock.getPeerCertificate();
+      sock.end();
+      if (!cert?.valid_to) { resolve({ error: 'no certificate presented' }); return; }
+      const exp = Date.parse(cert.valid_to);
+      const issuer = (cert.issuer as { O?: string; CN?: string } | undefined);
+      resolve({ expiresAt: new Date(exp).toISOString(), daysLeft: Math.floor((exp - Date.now()) / 86400_000), issuer: issuer?.O ?? issuer?.CN ?? null });
+    });
+    sock.on('timeout', () => { sock.destroy(); resolve({ error: `timeout after ${timeoutMs} ms` }); });
+    sock.on('error', (err) => resolve({ error: redactError(err, 120) }));
+  });
 }

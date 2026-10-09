@@ -10,6 +10,8 @@ import { type Auth, type Principal, RateLimiter } from './auth.js';
 import type { ConnectionView } from '@berrie/shared';
 import { ConnectionStore } from '../db/connections.js';
 import { impactOf, routeOf } from '../core/impact.js';
+import type { IncidentEngine } from '../core/incidents.js';
+import type { IncidentView, MaintenanceWindow } from '@berrie/shared';
 
 const ACTIONS = ['start', 'stop', 'restart'] as const;
 type Action = (typeof ACTIONS)[number];
@@ -27,6 +29,7 @@ interface Ctx {
   world: World;
   scheduler: Scheduler;
   auth: Auth;
+  incidents: IncidentEngine;
   selfContainerId: string | null;
 }
 
@@ -81,10 +84,29 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     const a = repo.getEntity(c.src), b = repo.getEntity(c.dst);
     return !!a && !!b && entityVisible(p, a) && entityVisible(p, b);
   };
+  const incidentVisible = (p: Principal | null, v: IncidentView): IncidentView | null => {
+    const entities = v.entities.filter((x) => { const e = repo.getEntity(x.entityId); return !!e && entityVisible(p, e); });
+    if (!entities.length) return null;
+    const hidden = v.hypothesisEntityId && !entities.some((x) => x.entityId === v.hypothesisEntityId) && !(() => { const h = repo.getEntity(v.hypothesisEntityId!); return h && entityVisible(p, h); })();
+    return { ...v, entities, ...(hidden ? { hypothesis: null, hypothesisEntityId: null } : {}) };
+  };
+  const windowVisible = (p: Principal | null, w: MaintenanceWindow): MaintenanceWindow | null => {
+    const ids = w.entityIds.filter((id) => { const e = repo.getEntity(id); return !!e && entityVisible(p, e); });
+    return ids.length ? { ...w, entityIds: ids } : null;
+  };
+  const opsFor = (p: Principal | null) => {
+    const weekAgo = new Date(Date.now() - 7 * 86400_000).toISOString();
+    const rows = repo.ops.incidents({ limit: 300 }).filter((i) => i.status !== 'resolved' || (i.resolvedAt ?? '') > weekAgo);
+    return {
+      incidents: rows.map((r) => incidentVisible(p, ctx.incidents.view(r))).filter((x): x is IncidentView => !!x),
+      acks: repo.ops.acks().filter((a) => { const e = repo.getEntity(a.entityId); return !!e && entityVisible(p, e); }),
+      maintenance: repo.ops.maintenance().map((w) => windowVisible(p, w)).filter((x): x is MaintenanceWindow => !!x),
+    };
+  };
   const connectionsFor = (p: Principal | null) => repo.connections.list().map(ConnectionStore.view).filter((c) => c.lifecycle !== 'archived' && connectionVisible(p, c));
 
   const snapshot = (p: Principal | null): WorldSnapshot => ({
-    mode: cfg.mode, entities: viewsFor(p), connections: connectionsFor(p), blocks: repo.blockViews().filter((b) => blockVisible(p, b)),
+    mode: cfg.mode, entities: viewsFor(p), connections: connectionsFor(p), ...opsFor(p), blocks: repo.blockViews().filter((b) => blockVisible(p, b)),
     adapters: repo.listAdapterStates().filter((a) => adapterVisible(p, a)),
     hints: scheduler.hints.filter((h) => hintVisible(p, h)),
     recentEvents: repo.listEvents({ limit: 120 }).filter((ev) => eventVisible(p, ev)).slice(0, 60),
@@ -328,6 +350,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
       event: (e) => { if (p && eventVisible(p, e)) send({ t: 'event', data: e }); },
       blocks: (b) => send({ t: 'blocks', data: b.filter((x) => blockVisible(p, x)) }),
       connection: (c) => { if (p && connectionVisible(p, c)) send({ t: 'connection', data: c }); },
+      ops: (m) => {
+        if (!p) return;
+        if (m.t === 'notification') { if (m.userId === p.user.id) send({ t: 'notification', data: m.data }); return; }
+        if (m.t === 'incident') { const v = incidentVisible(p, m.data); if (v) send({ t: 'incident', data: v }); return; }
+        if (m.t === 'maintenance') { const w = windowVisible(p, m.data); if (w) send({ t: 'maintenance', data: w }); return; }
+        if (m.t === 'ack') { const e = repo.getEntity(m.data.entityId); if (e && entityVisible(p, e)) send({ t: 'ack', data: m.data }); }
+      },
     });
     const extra = setInterval(() => {
       // Sessions can be revoked, users disabled or their server access changed: re-check regularly.

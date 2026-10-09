@@ -4,7 +4,9 @@ const SEV_COLOR = { info: '#5b8def', notice: '#3fd17a', warning: '#f2b33d', crit
 
 export function eventColor(ev: WorldEvent): string {
   if (ev.type === 'service.unhealthy' || ev.type === 'service.unreachable' || ev.type === 'host.offline') return '#ef4b4b';
-  if (ev.type === 'connection.degraded') return '#ef4b4b';
+  if (ev.type === 'connection.degraded' || ev.type === 'incident.opened') return '#ef4b4b';
+  if (ev.type === 'incident.resolved') return '#3fd17a';
+  if (ev.type === 'maintenance.started' || ev.type === 'maintenance.ended') return '#4aa8ff';
   if (ev.type === 'connection.recovered') return '#3fd17a';
   if (ev.type === 'service.recovered' || ev.type === 'service.healthy' || ev.type === 'host.online' || ev.type === 'container.started') return '#3fd17a';
   if (ev.type === 'service.removal_confirmed' || ev.type === 'service.archived') return '#8a94a6';
@@ -44,6 +46,11 @@ export function describeEvent(ev: WorldEvent, entities: Record<string, EntityVie
     case 'task.executed': return `${name} executed a task`;
     case 'alert': return `Alert on ${name}${d.message ? `: ${d.message}` : ''}`;
     case 'action.performed': return `${d.by ?? 'An operator'} ran ${d.action} on ${name}`;
+    case 'incident.opened': return `Incident opened: ${d.title ?? name}`;
+    case 'incident.recovered': return `Incident recovered (awaiting confirmation): ${d.title ?? name}`;
+    case 'incident.resolved': return `Incident resolved${d.by ? ` by ${d.by}` : ''}: ${d.title ?? name}`;
+    case 'maintenance.started': return `Maintenance started: ${d.title}`;
+    case 'maintenance.ended': return `Maintenance ended: ${d.title}`;
     case 'connection.discovered': return `New ${d.verification} ${String(d.type)} link: ${name} → ${rel}`;
     case 'connection.missing': return `${String(d.type)} link ${name} → ${rel} not reported — awaiting confirmation`;
     case 'connection.removed': return `${String(d.type)} link ${name} → ${rel} removal confirmed`;

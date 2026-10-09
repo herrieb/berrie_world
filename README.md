@@ -139,6 +139,26 @@ labelled as hypotheses. Click a bridge or ferry to inspect it (evidence, configu
 "connections": [{ "from": "srv01", "to": "nas", "type": "lan", "description": "same switch" }]
 ```
 
+## Operations: incidents, maintenance, notifications
+
+- **Incidents** open automatically from real failures (service unhealthy/unreachable, host offline). Failures on the same
+  host, or connected through known dependencies, are grouped into one incident (one notification per person). A
+  suggested cause is computed from the dependency graph and always labelled **hypothesis — not verified** until an
+  operator confirms or rejects it. When everything recovers the incident moves to *recovered — awaiting confirmation*;
+  a person confirms recovery to resolve it; a regression reopens it. Notes, acknowledgements, assignment and status
+  changes form an audited timeline that survives user removal.
+- **Replay** shows the recorded states of an incident's entities on the map with a time scrubber (no interpolation).
+- **Alerts** can be acknowledged per state change (a new failure alerts again).
+- **Maintenance windows** (hosts cover everything on them) suppress incidents and notifications during planned work —
+  raw health stays visible and maintenance is marked on the map and in alerts.
+- **Notifications** are personal (Account → Notifications): in-app, optional browser notifications, minimum severity,
+  favorites only; only for servers the person may see.
+- **Failure simulation** (Dependencies tab) never executes anything on real infrastructure.
+
+Extra metrics (`metrics` in the config file): endpoint response time from the regular checks, TLS certificate expiry of
+public hostnames (`tlsIntervalHours`, default 12 — alerts below 14 days), container CPU/memory from Docker stats
+(`containerIntervalSeconds`, default 300, 0 disables). A failed sample is absent, never stored as zero.
+
 ## Configuration
 
 Environment (see `.env.example`): `ADMIN_TOKEN` (bootstrap), `BERRIE_MASTER_KEY`, `SESSION_DAYS`, `SESSION_IDLE_HOURS`,

@@ -75,6 +75,10 @@ export interface RenderState {
   selectedConnection?: string | null;
   /** Impact overlay: entity id → class. */
   impact?: Map<string, ImpactClass> | null;
+  /** Incident replay: health per entity at the scrubbed moment (overrides live health). */
+  replayHealth?: Map<string, Health> | null;
+  /** Entities covered by an active maintenance window. */
+  maintenance?: Set<string>;
   /** Personal saved camera, used instead of fitting the whole world on first load. */
   initialCamera?: { x: number; y: number; zoom: number } | null;
 }
@@ -353,7 +357,7 @@ export class WorldRenderer {
     const p = (x: number, y: number, z: number) => [art.ox + isoX(x, y), art.oy + isoY(x, y) - z];
     n.sprite.hitArea = new Polygon([...p(0, 0, H), ...p(l.w, 0, H), ...p(l.w, 0, 0), ...p(l.w, l.h, 0), ...p(0, l.h, 0), ...p(0, l.h, H)]);
 
-    const h = effectiveHealth(e);
+    const h = s.replayHealth ? s.replayHealth.get(e.id) ?? 'unknown' : effectiveHealth(e);
     const color = hexNum(HEALTH_COLOR[h]);
     const match = !s.matching || s.matching.has(e.id);
     // Status tints: host outage greys the building; unknown is neutral; never decorative red.
@@ -381,7 +385,7 @@ export class WorldRenderer {
     }
 
     // floating marker
-    const mk = removed ? null : e.lifecycle === 'missing' ? 'missing' : h === 'host_offline' && e.kind === 'host' ? 'offline' : h === 'unhealthy' || h === 'unreachable' ? 'warn' : pressure(facts).length ? 'pressure' : null;
+    const mk = removed ? null : e.lifecycle === 'missing' ? 'missing' : h === 'host_offline' && e.kind === 'host' ? 'offline' : h === 'unhealthy' || h === 'unreachable' ? 'warn' : s.maintenance?.has(e.id) ? 'maintenance' : pressure(facts).length ? 'pressure' : null;
     if (mk !== n.markerKind) {
       n.marker?.destroy();
       n.marker = null;

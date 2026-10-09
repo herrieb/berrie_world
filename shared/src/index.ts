@@ -103,7 +103,12 @@ export type EventType =
   | 'connection.missing'
   | 'connection.removed'
   | 'connection.degraded'
-  | 'connection.recovered';
+  | 'connection.recovered'
+  | 'incident.opened'
+  | 'incident.recovered'
+  | 'incident.resolved'
+  | 'maintenance.started'
+  | 'maintenance.ended';
 
 export interface WorldEvent {
   id: string;
@@ -173,6 +178,9 @@ export interface WorldSnapshot {
   mode: Origin;
   entities: EntityView[];
   connections: ConnectionView[];
+  incidents: IncidentView[];
+  acks: AlertAck[];
+  maintenance: MaintenanceWindow[];
   blocks: BlockView[];
   adapters: AdapterStatus[];
   hints: HostnameHint[];
@@ -190,7 +198,11 @@ export type ServerMessage =
   | { t: 'blocks'; data: BlockView[] }
   | { t: 'removed'; data: { id: string } }
   | { t: 'hints'; data: HostnameHint[] }
-  | { t: 'connection'; data: ConnectionView };
+  | { t: 'connection'; data: ConnectionView }
+  | { t: 'incident'; data: IncidentView }
+  | { t: 'ack'; data: AlertAck }
+  | { t: 'maintenance'; data: MaintenanceWindow }
+  | { t: 'notification'; data: NotificationView };
 
 export const HEALTH_LABEL: Record<Health, string> = {
   healthy: 'Healthy',
@@ -431,4 +443,50 @@ export interface ImpactReport {
   items: ImpactItem[];
   /** Plain-language summary; a cause is always labelled as a hypothesis unless verified. */
   summary: string;
+}
+
+// ---------------------------------------------------------------- operations: incidents, maintenance, notifications
+
+export type IncidentStatus = 'open' | 'monitoring' | 'resolved';
+
+export interface IncidentView {
+  id: string;
+  title: string;
+  status: IncidentStatus;
+  severity: Severity;
+  rootEntityId: string | null;
+  /** Suggested cause. Shown as a hypothesis unless `hypothesisVerified`. */
+  hypothesis: string | null;
+  hypothesisEntityId: string | null;
+  hypothesisVerified: boolean;
+  assignee: { id: string; name: string } | null;
+  createdBy: string;
+  openedAt: string;
+  recoveredAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  entities: { entityId: string; role: 'affected' | 'suspected' | 'impact'; addedAt: string }[];
+}
+
+export interface TimelineEntry { id: string; ts: string; kind: string; actor: string; text: string; data: Record<string, unknown> }
+
+export interface AlertAck { entityId: string; since: string; actor: string; ts: string; note: string | null }
+
+export interface MaintenanceWindow {
+  id: string;
+  title: string;
+  description: string | null;
+  entityIds: string[];
+  startsAt: string;
+  endsAt: string;
+  suppress: boolean;
+  createdBy: string;
+  cancelledAt: string | null;
+}
+
+export interface NotificationView { id: string; ts: string; severity: Severity; title: string; text: string | null; entityId: string | null; incidentId: string | null; readAt: string | null }
+
+/** Is `entityId` (or its host) covered by an active, non-cancelled maintenance window at `now`? */
+export function inMaintenance(windows: MaintenanceWindow[], e: Pick<EntityView, 'id' | 'hostId'>, now = Date.now()): MaintenanceWindow | null {
+  return windows.find((w) => !w.cancelledAt && Date.parse(w.startsAt) <= now && now < Date.parse(w.endsAt) && (w.entityIds.includes(e.id) || (!!e.hostId && w.entityIds.includes(e.hostId)))) ?? null;
 }

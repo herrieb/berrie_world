@@ -1,5 +1,6 @@
 import type {
-  BlockView, BuildingType, Completeness, ConnectionType, ConnectionView, EntityKind, EntityView, EventType, Health, Severity, Verification, WorldEvent,
+  AlertAck, BlockView, BuildingType, Completeness, ConnectionType, ConnectionView, EntityKind, EntityView, EventType, Health, IncidentView,
+  MaintenanceWindow, NotificationView, Severity, Verification, WorldEvent,
 } from '@berrie/shared';
 import { ConnectionStore } from '../db/connections.js';
 import { BLOCK_PITCH } from '@berrie/shared';
@@ -77,7 +78,15 @@ export type WorldListener = {
   event?: (e: WorldEvent) => void;
   blocks?: (b: BlockView[]) => void;
   connection?: (c: ConnectionView) => void;
+  /** Operational records (incidents, acks, maintenance); `userId` set = only for that user (notifications). */
+  ops?: (m: OpsMessage) => void;
 };
+
+export type OpsMessage =
+  | { t: 'incident'; data: IncidentView }
+  | { t: 'ack'; data: AlertAck }
+  | { t: 'maintenance'; data: MaintenanceWindow }
+  | { t: 'notification'; data: NotificationView; userId: string };
 
 const BAD: Health[] = ['degraded', 'unhealthy', 'unreachable', 'restarting', 'host_offline'];
 const LOT_OFFSETS: [number, number][] = [[1, 1], [4, 1], [1, 4], [4, 4]];
@@ -126,6 +135,10 @@ export class World {
     });
     for (const l of this.listeners) l.event?.(ev);
     return ev;
+  }
+
+  publishOps(m: OpsMessage): void {
+    for (const l of this.listeners) l.ops?.(m);
   }
 
   markDirty(id: string): void {
@@ -378,12 +391,14 @@ export class World {
     const patch: Parameters<Repo['updateStatus']>[1] = { reason, lastCheckAt: now };
     if (health !== 'unknown') patch.lastKnownHealth = health;
     if (health === 'healthy') patch.lastSuccessAt = now;
-    if (st.health !== health) {
+    const changed = st.health !== health;
+    if (changed) {
       patch.health = health;
       patch.lastChangeAt = now;
-      this.emitHealthTransition(e, st.health, st.lastKnownHealth, health, reason, source);
     }
+    // Persist first, then emit: listeners (incidents, impact) must see the new state.
     this.repo.updateStatus(id, patch);
+    if (changed) this.emitHealthTransition(e, st.health, st.lastKnownHealth, health, reason, source);
     if (opts.factual) this.repo.updateStatus(id, { consecutiveFailures: 0, consecutiveSuccesses: 0 });
     this.dirty.add(id);
   }

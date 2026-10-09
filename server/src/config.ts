@@ -85,6 +85,8 @@ export interface AppConfig {
   /** Entity ids or container names that must never be controlled through actions. */
   protected: string[];
   tunnelConfigPaths: string[];
+  /** Polling intervals for optional metrics. 0 disables. */
+  metrics: { containerIntervalSeconds: number; tlsIntervalHours: number };
   gateways: GatewayConfig[];
   externals: ExternalConfig[];
   connections: ConnectionConfig[];
@@ -148,6 +150,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     hints: file.hints ?? [],
     protected: file.protected ?? [],
     tunnelConfigPaths: file.tunnelConfigPaths ?? [],
+    metrics: { containerIntervalSeconds: file.metrics?.containerIntervalSeconds ?? 300, tlsIntervalHours: file.metrics?.tlsIntervalHours ?? 12 },
     gateways: file.gateways ?? [],
     externals: file.externals ?? [],
     connections: file.connections ?? [],

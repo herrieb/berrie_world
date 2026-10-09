@@ -12,6 +12,8 @@ import { Auth } from './api/auth.js';
 import { registerRoutes } from './api/routes.js';
 import { registerAccountRoutes } from './api/accountRoutes.js';
 import { registerHarborRoutes } from './api/harborRoutes.js';
+import { registerOpsRoutes } from './api/opsRoutes.js';
+import { IncidentEngine } from './core/incidents.js';
 import { SecretBox } from './core/secrets.js';
 import type { TransportFactory } from './core/hosts.js';
 
@@ -20,6 +22,7 @@ export interface App {
   repo: Repo;
   world: World;
   box: SecretBox;
+  incidents: IncidentEngine;
   scheduler: Scheduler;
   close: () => Promise<void>;
 }
@@ -48,6 +51,7 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
   const scheduler = new Scheduler(cfg, world, {
     log: (msg, extra) => http.log.warn(extra ?? {}, msg),
   }, cfg.mode === 'demo' ? new DemoAdapter() : null, { box, transportFactory: opts.transportFactory, startEvents: opts.startScheduler !== false });
+  const incidents = new IncidentEngine(cfg, repo, world);
   const knownHosts = () => repo.listEntities().filter((e) => e.kind === 'host').map((e) => e.id).sort();
 
   await http.register(cookie);
@@ -72,7 +76,8 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
     }
   });
   await registerAccountRoutes(http, { cfg, repo, auth, box, knownHosts });
-  await registerRoutes(http, { cfg, world, scheduler, auth, selfContainerId: selfContainerId() });
+  await registerRoutes(http, { cfg, world, scheduler, auth, incidents, selfContainerId: selfContainerId() });
+  await registerOpsRoutes(http, { repo, world, auth, incidents });
   await registerHarborRoutes(http, { repo, world, scheduler, auth, box, transportFactory: opts.transportFactory });
 
   if (cfg.webDist && existsSync(cfg.webDist)) {
@@ -83,11 +88,17 @@ export async function buildApp(cfg: AppConfig, opts: { clock?: () => Date; start
     });
   }
 
-  if (opts.startScheduler !== false) scheduler.start();
+  let opsTimer: NodeJS.Timeout | null = null;
+  if (opts.startScheduler !== false) {
+    scheduler.start();
+    opsTimer = setInterval(() => incidents.tick(), 30_000);
+    opsTimer.unref();
+  }
 
   return {
-    http, repo, world, scheduler, box,
+    http, repo, world, scheduler, box, incidents,
     close: async () => {
+      if (opsTimer) clearInterval(opsTimer);
       scheduler.stop();
       await http.close();
       repo.close();
