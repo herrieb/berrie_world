@@ -24,6 +24,26 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const [arrange, setArrange] = useState(false);
   const [redrawing, setRedrawing] = useState(false);
   const [confirmNewMap, setConfirmNewMap] = useState(false);
+  // Collapsible panels (a per-browser convenience, remembered locally).
+  const readPanel = (k: string) => { try { return localStorage.getItem(`bw:panel:${k}`) === 'collapsed'; } catch { return false; } };
+  const [leftCollapsed, setLeftCollapsedState] = useState(() => readPanel('left'));
+  const [rightCollapsed, setRightCollapsedState] = useState(() => readPanel('right'));
+  const setPanel = (k: 'left' | 'right', v: boolean) => {
+    (k === 'left' ? setLeftCollapsedState : setRightCollapsedState)(v);
+    try { localStorage.setItem(`bw:panel:${k}`, v ? 'collapsed' : 'open'); } catch { /* storage unavailable */ }
+  };
+  const fullMap = leftCollapsed && rightCollapsed;
+  const toggleFullMap = () => { const v = !fullMap; setPanel('left', v); setPanel('right', v); };
+  // Opening something to inspect brings the right panel back.
+  useEffect(() => { if ((s.selectedId || s.selectedConnection) && rightCollapsed) setPanel('right', false); }, [s.selectedId, s.selectedConnection]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (hidden || (e.target as HTMLElement)?.closest?.('input,textarea,select')) return;
+      if (e.key === 'h' || e.key === 'H') toggleFullMap();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   const [plane, setPlane] = useState<{ selected: boolean; following: boolean; over: string | null }>({ selected: false, following: false, over: null });
   /** Viewers: run discovery and redraw. Operators: generate a new map (after confirmation). */
   const redraw = async (newMap: boolean) => {
@@ -123,8 +143,11 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       {s.mode === 'demo' && <div className="demo-banner">DEMO MODE — scripted fixture data, not your infrastructure</div>}
       {s.ws === 'closed' && s.loaded && <div className="stale-banner">Lost connection to the Berrie World server. Reconnecting… values shown are the last known state.</div>}
 
+      {leftCollapsed ? (
+        <button className="panel-tab left" onClick={() => setPanel('left', false)} title="Show overview"><Icon name="list" /> Overview<span className="mini-counts"><i style={{ background: HEALTH_COLOR.healthy }} />{summary.healthy}<i style={{ background: HEALTH_COLOR.unhealthy }} />{summary.degradedOrUnhealthy}</span></button>
+      ) : (
       <aside className="overview card">
-        <h3>Overview</h3>
+        <div className="card-head"><h3>Overview</h3><button className="icon-btn" onClick={() => setPanel('left', true)} title="Minimise overview"><Icon name="minus" size={14} /></button></div>
         <ul className="counts">
           {counts.map(([label, n, color, f]) => (
             <li key={label}>
@@ -170,11 +193,13 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         </div>
         {noBuilding.length > 0 && <p className="hint-small">{noBuilding.length} service(s) without a plot (district full).</p>}
       </aside>
+      )}
 
       <div className="controls">
         <button onClick={() => rendererRef.current?.zoomBy(1.25)} title="Zoom in (+)"><Icon name="plus" /></button>
         <button onClick={() => rendererRef.current?.zoomBy(0.8)} title="Zoom out (−)"><Icon name="minus" /></button>
         <button onClick={() => rendererRef.current?.fit()} title="Fit village"><Icon name="target" /></button>
+        <button className={fullMap ? 'on' : ''} onClick={toggleFullMap} title={fullMap ? 'Show the side panels (H)' : 'Full map: hide the side panels (H)'}><Icon name={fullMap ? 'minimize' : 'maximize'} /></button>
         <button onClick={() => (canOperate ? setConfirmNewMap(true) : void redraw(false))} disabled={redrawing} className={redrawing ? 'spinning' : ''} title={canOperate ? 'Redraw: generate a new map (new random positions for all islands and buildings)' : 'Redraw the map from a fresh discovery'}><Icon name="restart" /></button>
         {hosts.length > 1 && <button className={arrange ? 'on' : ''} onClick={() => { setArrange(!arrange); if (s.editLayout) s.setEditLayout(false); }} title="Arrange islands (personal — only changes your own map)"><Icon name="anchor" /></button>}
         {canOperate && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
@@ -234,11 +259,16 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         );
       })()}
 
+      {rightCollapsed ? (
+        <button className="panel-tab right" onClick={() => setPanel('right', false)} title="Show activity panel"><Icon name="activity" /> {alerts.length ? <span className="badge bad">{alerts.length}</span> : null} Activity</button>
+      ) : (
       <aside className="sidepanel">
+        <button className="panel-collapse" onClick={() => { setPanel('right', true); }} title="Minimise panel"><Icon name="chevron" size={14} /></button>
         {selected ? <Inspector entity={selected} onClose={() => s.select(null)} />
           : s.selectedConnection && s.connections[s.selectedConnection] ? <ConnectionInspector c={s.connections[s.selectedConnection]} onClose={() => s.selectConnection(null)} />
           : <ActivityPanel alerts={alerts} />}
       </aside>
+      )}
 
       {s.loaded && !s.connected && s.mode === 'live' && (
         <div className="setup card">
