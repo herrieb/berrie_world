@@ -36,7 +36,7 @@ class FakeDocker {
   async stop() { this.server.closeAllConnections(); await new Promise((r) => this.server.close(r)); }
 }
 
-const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean; tunnel?: boolean } = {}) => [
+const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean; tunnel?: boolean; listen?: string[] } = {}) => [
   '', '@@hostname', 'srv-a', '@@os', 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"', 'NAME="Debian GNU/Linux"', 'VERSION_ID="12"',
   '@@uname', 'Linux 6.1.0-18-amd64 x86_64', '@@uptime', '86400.5 300000.1', '@@loadavg', '0.42 0.30 0.25 1/300 12345',
   '@@meminfo', ...(opts.meminfo === false ? ['cat: /proc/meminfo: Permission denied'] : ['MemTotal:        8000000 kB', 'MemFree:         1000000 kB', 'MemAvailable:    6000000 kB', 'SwapTotal:       1000000 kB', 'SwapFree:         900000 kB']),
@@ -45,6 +45,7 @@ const COLLECTOR_OUTPUT = (opts: { meminfo?: boolean; tunnel?: boolean } = {}) =>
   '@@stat2', 'cpu  150 0 150 900 0 0 0 0 0 0', '@@net2', 'Inter-|   Receive', ' face |bytes', '  eth0: 6000 10 0 0 0 0 0 0 4000 20 0 0 0 0 0 0',
   '@@df', 'Filesystem Type 1-blocks Used Available Capacity Mounted on', '/dev/sda1 ext4 100000000000 42000000000 58000000000 42% /',
   '@@docker', 'permission denied while trying to connect to the Docker daemon socket', '@@cloudflared', opts.tunnel ? 'active' : 'inactive',
+  '@@listen', ...(opts.listen ?? ['LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*']),
   '@@cftunnel', ...(opts.tunnel ? [JSON.stringify({ version: 3, config: { ingress: [{ hostname: 'tv.example.com', service: 'http://localhost:8080' }, { hostname: 'cam.example.com', service: 'http://localhost:9000' }, { service: 'http_status:404' }] } })] : []),
   '@@tailscale', '__NA__', '@@end', '',
 ].join('\n');
@@ -53,11 +54,12 @@ class FakeSsh implements Transport {
   static fail: null | 'network' | 'auth' = null;
   static meminfo = true;
   static tunnel = false;
+  static listen: string[] | undefined = undefined;
   constructor(private readonly dockerPort: () => number) {}
   async exec() {
     if (FakeSsh.fail === 'network') throw Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:22'), { code: 'ECONNREFUSED' });
     if (FakeSsh.fail === 'auth') throw new Error('All configured authentication methods failed');
-    return { code: 0, stdout: COLLECTOR_OUTPUT({ meminfo: FakeSsh.meminfo, tunnel: FakeSsh.tunnel }), stderr: '' };
+    return { code: 0, stdout: COLLECTOR_OUTPUT({ meminfo: FakeSsh.meminfo, tunnel: FakeSsh.tunnel, listen: FakeSsh.listen }), stderr: '' };
   }
   async forwardSocket() {
     if (FakeSsh.fail) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
@@ -105,7 +107,7 @@ beforeEach(async () => {
   await docker.start(); await docker2.start();
   docker.containers = [container('web'), container('db')];
   docker2.containers = [container('api', 'billing')];
-  FakeSsh.fail = null; FakeSsh.meminfo = true; FakeSsh.tunnel = false;
+  FakeSsh.fail = null; FakeSsh.meminfo = true; FakeSsh.tunnel = false; FakeSsh.listen = undefined;
   const cfg = { ...loadConfig({ DATA_DIR: dir, CONFIG_PATH: join(dir, 'none.json'), BERRIE_MASTER_KEY: 'a'.repeat(64) }), hosts: [] };
   app = await buildApp(cfg, { startScheduler: false, logger: false, transportFactory: () => new FakeSsh(() => docker.port) });
   admin = await signIn(app, 'admin');
@@ -313,6 +315,41 @@ describe('server islands and Server Harbor', () => {
     const later = await snapshot();
     expect(later.entities.find((e) => e.id === 'endpoint:tv.example.com')!.lifecycle).not.toMatch(/missing|removed/);
     expect(later.entities.find((e) => e.id === 'gateway:pi:cloudflared')).toBeDefined();
+  });
+
+  it('listening ports come from the server itself; tunnel-routed host processes become services', async () => {
+    FakeSsh.tunnel = true;
+    FakeSsh.listen = [
+      'LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*',
+      'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*',
+      'LISTEN 0 128 127.0.0.1:9000 0.0.0.0:* users:(("python3",pid=812,fd=3))',
+      'LISTEN 0 4096 [::]:5432 [::]:*',
+      'LISTEN 0 4096 100.92.27.95:41641 0.0.0.0:*',
+    ];
+    await registerSsh('pi', 'none');
+    await cycle();
+    await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!);
+    await cycle(); await cycle();
+    const snap = await snapshot();
+    const facts = snap.entities.find((e) => e.id === 'host:pi')!.meta.facts as HostFacts;
+    expect(facts.ports.status).toBe('confirmed');
+    const by = (p: number) => facts.ports.value!.listeners.find((l) => l.port === p)!;
+    expect(by(8080).scope).toBe('all');
+    expect(by(9000)).toMatchObject({ scope: 'loopback', process: 'python3' });
+    expect(by(5432).scope).toBe('all');
+    expect(by(41641).scope).toBe('tailscale');
+    const tvSvc = snap.entities.find((e) => e.id === 'proc:pi:8080')!;
+    expect(tvSvc.kind).toBe('service');
+    expect(tvSvc.health).toBe('healthy');
+    expect(snap.entities.find((e) => e.id === 'endpoint:tv.example.com')!.meta.routesTo).toBe('proc:pi:8080');
+    expect(snap.entities.find((e) => e.id === 'proc:pi:9000')!.name).toBe('python3 :9000');
+    // A listening port that no route uses (5432) does not become a building: no noise.
+    expect(snap.entities.some((e) => e.id === 'proc:pi:5432')).toBe(false);
+    // The process stops listening (fresh, complete report): missing — awaiting confirmation, not deleted.
+    FakeSsh.listen = ['LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*', 'LISTEN 0 128 127.0.0.1:9000 0.0.0.0:* users:(("python3",pid=812,fd=3))'];
+    await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!);
+    await cycle();
+    expect((await snapshot()).entities.find((e) => e.id === 'proc:pi:8080')!.lifecycle).toBe('missing');
   });
 
   it('the push agent reports with its own token; containers it reports become services', async () => {

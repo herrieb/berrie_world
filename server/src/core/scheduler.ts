@@ -130,6 +130,7 @@ export class Scheduler {
         // Re-run host inventories so metadata from Docker /info and collectors is attached.
         this.safe('config', () => this.world.reconcile(configInventory(this.cfg, describe())));
         this.safe('harbor', () => this.world.reconcile(this.hosts.hostInventory()));
+        this.safe('listeners', () => { for (const inv of this.hosts.listenerInventories()) this.world.reconcile(inv); });
         let checks: { entityId: string; check: CheckConfig }[] = [];
         try {
           const plan = await endpointInventory(this.cfg, this.world.repo, this.hosts.tunnelRoutes);

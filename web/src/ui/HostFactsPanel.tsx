@@ -1,6 +1,7 @@
 import { Fragment } from 'react';
-import type { EntityView, Fact, FactCategory, FactStatus } from '@berrie/shared';
-import { FACT_CATEGORIES, FACT_LABEL } from '@berrie/shared';
+import type { EntityView, Fact, FactCategory, FactStatus, Listener } from '@berrie/shared';
+import { FACT_CATEGORIES, FACT_LABEL, SENSITIVE_PORTS, WELL_KNOWN_PORTS } from '@berrie/shared';
+import { useStore } from '../state/store';
 import { fmtBytes, timeAgo } from './status';
 import { fmtDuration, hostFacts, pressure } from './facts';
 
@@ -20,6 +21,7 @@ function value(c: FactCategory, f: Fact<unknown>): string {
     case 'network': return (v.interfaces as { name: string; rxBps: number | null; txBps: number | null }[]).map((i) => `${i.name} ↓${i.rxBps != null ? fmtBytes(i.rxBps) + '/s' : '?'} ↑${i.txBps != null ? fmtBytes(i.txBps) + '/s' : '?'}`).join(' · ') || 'no physical interfaces';
     case 'uptime': return `up ${fmtDuration(Number(v.seconds))} · load ${v.load1} / ${v.load5} / ${v.load15}`;
     case 'containers': return `${v.running} running · ${v.stopped} stopped`;
+    case 'ports': { const ls = v.listeners as Listener[]; return `${new Set(ls.map((l) => l.port)).size} ports · ${new Set(ls.filter((l) => l.scope === 'all').map((l) => l.port)).size} on all interfaces`; }
     default: return '';
   }
 }
@@ -47,6 +49,41 @@ export function HostFactsPanel({ e, offset }: { e: EntityView; offset: number })
           );
         })}
       </dl>
+      <PortsList e={e} />
     </section>
+  );
+}
+
+const SCOPE_TEXT: Record<Listener['scope'], string> = { all: 'All interfaces', lan: 'Specific address', tailscale: 'Tailscale only', loopback: 'This machine only' };
+
+/** Listening ports grouped by exposure, labelled with the container that publishes them when Docker explains it. */
+function PortsList({ e }: { e: EntityView }) {
+  const entities = useStore((s) => s.entities);
+  const f = hostFacts(e)?.ports;
+  if (!f?.value?.listeners.length) return null;
+  const containers = Object.values(entities).filter((x) => x.hostId === e.id && x.kind === 'service');
+  const owner = (port: number) => containers.find((c) => ((c.meta.ports as string[]) ?? []).some((p) => p.includes(`:${port}->`)));
+  const byPort = new Map<string, Listener>();
+  for (const l of f.value.listeners) { const k = `${l.scope}|${l.port}`; if (!byPort.has(k)) byPort.set(k, l); }
+  const groups = (['all', 'lan', 'tailscale', 'loopback'] as const).map((sc) => [sc, [...byPort.values()].filter((l) => l.scope === sc)] as const).filter(([, ls]) => ls.length);
+  const exposed = [...byPort.values()].filter((l) => l.scope === 'all' && SENSITIVE_PORTS.has(l.port));
+  return (
+    <details className="ports">
+      <summary>Listening ports ({new Set(f.value.listeners.map((l) => l.port)).size}) — from the server's own socket list, not a scan</summary>
+      {exposed.length > 0 && <div className="callout amber"><b>Worth a look</b><p>{exposed.map((l) => `${WELL_KNOWN_PORTS[l.port] ?? l.port} (${l.port})`).join(', ')} listen on all interfaces. Whether that is reachable from outside depends on your router/firewall — Berrie World does not test it.</p></div>}
+      {groups.map(([sc, ls]) => (
+        <div key={sc}>
+          <h5>{SCOPE_TEXT[sc]}</h5>
+          <ul className="port-list">
+            {ls.map((l) => { const c = owner(l.port); return (
+              <li key={`${sc}${l.port}`} className={sc === 'all' && SENSITIVE_PORTS.has(l.port) ? 'warn' : ''}>
+                <b>{l.port}</b><span>{c ? c.displayName : l.process ?? (WELL_KNOWN_PORTS[l.port] ? `probably ${WELL_KNOWN_PORTS[l.port]}` : 'unknown process')}</span><small>{l.address}</small>
+              </li>
+            ); })}
+          </ul>
+        </div>
+      ))}
+      <p className="small muted">Processes owned by other users (e.g. root) cannot be named without root rights; labels marked “probably” come from the port number only.</p>
+    </details>
   );
 }

@@ -353,12 +353,31 @@ export interface HostFacts {
   network: Fact<{ interfaces: { name: string; rxBps: number | null; txBps: number | null }[] }>;
   uptime: Fact<{ seconds: number; load1: number; load5: number; load15: number }>;
   containers: Fact<{ running: number; stopped: number; total: number }>;
+  ports: Fact<{ listeners: Listener[] }>;
 }
+
+/**
+ * A listening TCP socket as reported by the server itself (`ss -ltn`), never by scanning.
+ * scope: loopback = this machine only; tailscale = tailnet address only; lan = a specific address; all = every interface.
+ * process is only known for processes owned by the collector's user (no root); otherwise null.
+ */
+export interface Listener { port: number; address: string; scope: 'loopback' | 'tailscale' | 'lan' | 'all'; process: string | null }
+
 export type FactCategory = keyof HostFacts;
-export const FACT_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'storage', 'network', 'uptime', 'containers'];
+export const FACT_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'storage', 'network', 'uptime', 'containers', 'ports'];
 export const FACT_LABEL: Record<FactCategory, string> = {
-  identity: 'Hostname', os: 'Operating system', cpu: 'CPU', memory: 'Memory', storage: 'Storage', network: 'Network', uptime: 'Uptime & load', containers: 'Containers',
+  identity: 'Hostname', os: 'Operating system', cpu: 'CPU', memory: 'Memory', storage: 'Storage', network: 'Network', uptime: 'Uptime & load', containers: 'Containers', ports: 'Listening ports',
 };
+
+/** Well-known ports, used only as a label ("probably"), never as proof of what runs there. */
+export const WELL_KNOWN_PORTS: Record<number, string> = {
+  22: 'SSH', 25: 'SMTP', 53: 'DNS', 80: 'HTTP', 139: 'SMB', 443: 'HTTPS', 445: 'SMB', 2375: 'Docker API (unencrypted)', 2376: 'Docker API (TLS)',
+  3000: 'web app', 3306: 'MySQL', 5432: 'PostgreSQL', 5678: 'n8n', 6379: 'Redis', 8080: 'HTTP (alt)', 9000: 'PHP-FPM / app', 11434: 'Ollama',
+  27017: 'MongoDB', 9090: 'Prometheus', 19999: 'Netdata', 51820: 'WireGuard',
+};
+
+/** Services that should normally not listen on every interface. */
+export const SENSITIVE_PORTS = new Set([2375, 3306, 3307, 5432, 6379, 27017, 9200, 11211]);
 
 export type DiscoveryMethod = 'ssh' | 'agent' | 'docker' | 'manual';
 export type Biome = 'meadow' | 'autumn' | 'snow' | 'desert' | 'tropical';

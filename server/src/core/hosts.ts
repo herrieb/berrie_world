@@ -1,4 +1,7 @@
 import type { Biome, DiscoveryMethod, FactCategory, HostFacts, HostRegistration } from '@berrie/shared';
+import { WELL_KNOWN_PORTS } from '@berrie/shared';
+import { classify } from '../adapters/classify.js';
+import type { ObservedEntity } from './world.js';
 import type { AppConfig, CheckConfig, HostConfig } from '../config.js';
 import type { HostRow } from '../db/hosts.js';
 import type { Repo } from '../db/repo.js';
@@ -29,7 +32,7 @@ export type DockerEventHandler = (hostId: string, ev: { action: string; entityId
 /** Builds SSH transports; tests replace it with a fake. */
 export type TransportFactory = (target: { address: string; port: number; username: string }, secret: SshSecret, hostKey: string) => Transport;
 
-const COLLECTOR_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'storage', 'network', 'uptime', 'containers'];
+const COLLECTOR_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'storage', 'network', 'uptime', 'containers', 'ports'];
 const DOCKER_CATEGORIES: FactCategory[] = ['identity', 'os', 'cpu', 'memory', 'containers'];
 
 /** Read-only "client" over the last container list an agent pushed. */
@@ -336,6 +339,43 @@ export class HostManager {
     }
     if (body.dockerError) this.world.reconcile({ adapter: 'docker', scope: h.id, completeness: 'unavailable', entities: [], error: redactError(body.dockerError, 160) });
     return { ok: true, containers: null };
+  }
+
+  /**
+   * Host processes behind tunnel routes: a route to localhost:<port> that no container publishes, with a listener on
+   * that port in the server's own socket table, becomes a service. Only produced from a fresh, confirmed socket list,
+   * so a silent collector never removes one.
+   */
+  listenerInventories(): InventoryResult[] {
+    const out: InventoryResult[] = [];
+    for (const h of this.resolve()) {
+      if (h.status !== 'active') continue;
+      const ports = this.repo.hosts.getFacts(h.id)?.ports;
+      const routes = this.tunnelRoutes.get(h.id);
+      if (!routes || !ports || ports.status !== 'confirmed' || !ports.ts || Date.now() - Date.parse(ports.ts) > h.intervalSeconds * 3000) continue;
+      const containers = this.repo.listEntities().filter((e) => e.hostId === h.entityId && e.kind === 'service' && !e.meta.hostProcess);
+      const entities = new Map<string, ObservedEntity>();
+      for (const r of routes.rules) {
+        let u: URL;
+        try { u = new URL(r.service); } catch { continue; }
+        if (!['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(u.hostname)) continue;
+        const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+        if (containers.some((c) => ((c.meta.ports as string[]) ?? []).some((p) => p.includes(`:${port}->`)))) continue;
+        const l = ports.value?.listeners.find((x) => x.port === port && x.scope !== 'tailscale');
+        if (!l) continue;
+        const id = `proc:${h.id}:${port}`;
+        const prev = entities.get(id);
+        const label = l.process ?? WELL_KNOWN_PORTS[port] ?? `port ${port}`;
+        entities.set(id, {
+          id, kind: 'service', name: prev?.name ?? (l.process ? `${l.process} :${port}` : `${r.hostname.split('.')[0]} (${label})`),
+          buildingType: classify({ names: [l.process ?? '', r.hostname.split('.')[0]], hasHttp: u.protocol.startsWith('http') }), parentId: h.entityId, hostId: h.entityId,
+          meta: { hostProcess: true, port, listen: `${l.address}:${port}`, process: l.process, ports: [`127.0.0.1:${port}->${port}/tcp`], routedBy: [...((prev?.meta?.routedBy as string[]) ?? []), r.hostname] },
+          health: { health: 'healthy', reason: `listening on ${l.address}:${port} (reported by the server)` },
+        });
+      }
+      out.push({ adapter: 'listeners', scope: h.id, completeness: 'complete', entities: [...entities.values()] });
+    }
+    return out;
   }
 
   /** Reachability probes for Harbor hosts that asked for one (config hosts define theirs in the config file). */
