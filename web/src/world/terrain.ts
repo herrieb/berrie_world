@@ -10,7 +10,9 @@ export interface Terrain {
   offsetY: number;
   land: Set<string>;
   roads: Set<string>;
-  trees: { x: number; y: number; kind: 'pine' | 'round' | 'bush' | 'birch' | 'rock'; seed: number }[];
+  trees: { x: number; y: number; z: number; kind: 'pine' | 'round' | 'bush' | 'birch' | 'rock'; seed: number }[];
+  /** Terrain height in pixels per land tile (0 for roads, lots, buildings and coast). */
+  height: Map<string, number>;
   lamps: { x: number; y: number }[];
   signs: { x: number; y: number; group: string }[];
   lighthouse: { x: number; y: number } | null;
@@ -32,6 +34,9 @@ export const TREE_TINT: Record<Biome, number> = { meadow: 0xffffff, autumn: 0xff
 
 const key = (x: number, y: number) => `${x},${y}`;
 const CLIFF = 12;
+/** Pixels per terrain level; hills rise in terraces away from the city and the coast. */
+const HSTEP = 8;
+const MAXLV = 3;
 export const DEEP: RGB = hex(0x1d5a86);
 
 function distToRect(x: number, y: number, r: Rect): number {
@@ -96,17 +101,45 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
     frontier = next;
   }
 
+  // --- terrain height: terraced hills away from the city (roads, lots, buildings stay flat) and the coast ---
+  const blocked = new Set<string>();
+  for (const r of buildings) for (let i = -1; i <= r.w; i++) for (let j = -1; j <= r.h; j++) blocked.add(key(r.x + i, r.y + j));
+  const flatTile = (x: number, y: number) => { const k = key(x, y); return roads.has(k) || lots.has(k) || blocked.has(k) || coastal(x, y); };
+  const dist = new Map<string, number>();
+  let wave: [number, number][] = [];
+  for (const k of land) { const [x, y] = k.split(',').map(Number); if (flatTile(x, y)) { dist.set(k, 0); wave.push([x, y]); } }
+  for (let d = 1; d <= MAXLV + 1 && wave.length; d++) {
+    const next: [number, number][] = [];
+    for (const [x, y] of wave) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const k = key(x + dx, y + dy);
+      if (!land.has(k) || dist.has(k)) continue;
+      dist.set(k, d);
+      next.push([x + dx, y + dy]);
+    }
+    wave = next;
+  }
+  const level = new Map<string, number>();
+  for (const k of land) {
+    const [x, y] = k.split(',').map(Number);
+    const d = dist.get(k) ?? MAXLV + 1;
+    const hill = noise(x * 0.075, y * 0.075, 90) * 0.75 + noise(x * 0.2, y * 0.2, 91) * 0.25;
+    const lv = Math.max(0, Math.min(MAXLV, Math.floor((hill - 0.33) * 7), d - 1));
+    if (lv > 0) level.set(k, lv);
+  }
+  const lvl = (x: number, y: number) => level.get(key(x, y)) ?? 0;
+
   // --- canvas ---
   const sxMin = (bounds.minX - (bounds.maxY + 1)) * (TW / 2);
   const sxMax = (bounds.maxX + 1 - bounds.minY) * (TW / 2);
-  const syMin = (bounds.minX + bounds.minY) * (TH / 2);
+  const syMin = (bounds.minX + bounds.minY) * (TH / 2) - MAXLV * HSTEP;
   const syMax = (bounds.maxX + bounds.maxY + 2) * (TH / 2) + CLIFF + 4;
   const W = Math.min(8192, sxMax - sxMin), H = Math.min(8192, syMax - syMin);
   const px = new Px(W, H);
   const top = (x: number, y: number): [number, number] => [(x - y) * (TW / 2) - sxMin, (x + y) * (TH / 2) - syMin];
 
-  const diamond = (x: number, y: number, color: (u: number, v: number, sx: number, sy: number) => RGB | null) => {
-    const [sx, sy] = top(x, y);
+  const diamond = (x: number, y: number, color: (u: number, v: number, sx: number, sy: number) => RGB | null, lift = 0) => {
+    const [sx, sy0] = top(x, y);
+    const sy = sy0 - lift;
     for (let r = 0; r < TH; r++) {
       const hw = r < TH / 2 ? (r + 1) * 2 : (TH - r) * 2;
       for (let i = -hw; i < hw; i++) {
@@ -163,6 +196,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
       });
     } else {
       const lot = lots.has(k);
+      const lv = lvl(x, y);
       diamond(x, y, (u, v, sx, sy) => {
         const fx = x + u, fy = y + v;
         const patch = noise(fx * 0.35, fy * 0.35, 2);
@@ -172,15 +206,17 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
         if (h > 0.93) c = shade(c, 1.15);
         else if (h < 0.06) c = shade(c, 0.85);
         if (lot && h > 0.995) c = [hex(0xffffff), hex(0xffd84d), hex(0xf58fb0)][Math.floor(hash2(sx, sy, 1) * 3)];
+        if (lv) c = shade(lv === MAXLV ? mix(c, hex(0x8f9184), 0.25) : c, 1 + lv * 0.035);
         return c;
-      });
+      }, lv * HSTEP);
     }
-    // cliff faces on edges facing the viewer
+    // cliff faces on edges facing the viewer: down to the sea, or down to a lower terrace
     const isBeach = beach(x, y);
-    const ch = isBeach ? 3 : CLIFF;
-    const faceAt = (edge: 'E' | 'S') => {
-      const [ax, ay] = edge === 'E' ? top(x + 1, y) : top(x + 1, y + 1);
-      const [bx, by] = edge === 'E' ? top(x + 1, y + 1) : top(x, y + 1);
+    const lift = lvl(x, y) * HSTEP;
+    const faceAt = (edge: 'E' | 'S', ch: number) => {
+      const [ax, ay0] = edge === 'E' ? top(x + 1, y) : top(x + 1, y + 1);
+      const [bx, by0] = edge === 'E' ? top(x + 1, y + 1) : top(x, y + 1);
+      const ay = ay0 - lift, by = by0 - lift;
       const f = edge === 'E' ? 0.7 : 0.9;
       const steps = Math.abs(bx - ax);
       for (let i = 0; i <= steps; i++) {
@@ -198,21 +234,20 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
         }
       }
     };
-    if (!isLand(x + 1, y)) faceAt('E');
-    if (!isLand(x, y + 1)) faceAt('S');
+    const seaDrop = lift + (isBeach ? 3 : CLIFF);
+    if (!isLand(x + 1, y)) faceAt('E', seaDrop); else if (lvl(x + 1, y) < lvl(x, y)) faceAt('E', (lvl(x, y) - lvl(x + 1, y)) * HSTEP);
+    if (!isLand(x, y + 1)) faceAt('S', seaDrop); else if (lvl(x, y + 1) < lvl(x, y)) faceAt('S', (lvl(x, y) - lvl(x, y + 1)) * HSTEP);
   }
 
   // --- props ---
   const trees: Terrain['trees'] = [];
   const lamps: Terrain['lamps'] = [];
-  const blocked = new Set<string>();
-  for (const r of buildings) for (let i = -1; i <= r.w; i++) for (let j = -1; j <= r.h; j++) blocked.add(key(r.x + i, r.y + j));
   for (const [x, y] of order) {
     const k = key(x, y);
     if (roads.has(k) || blocked.has(k) || beach(x, y)) continue;
     const h = hash2(x, y, 31);
     if (lots.has(k)) {
-      if (h > 0.86) trees.push({ x: x + 0.5, y: y + 0.5, kind: h > 0.95 ? 'round' : 'bush', seed: Math.floor(h * 1000) });
+      if (h > 0.86) trees.push({ x: x + 0.5, y: y + 0.5, z: 0, kind: h > 0.95 ? 'round' : 'bush', seed: Math.floor(h * 1000) });
       continue;
     }
     const nearRoad = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => roads.has(key(x + dx, y + dy)));
@@ -222,7 +257,7 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
       for (let i = 0; i < n; i++) {
         const r = hash2(x, y, 50 + i);
         const kind = r < 0.5 ? 'pine' : r < 0.78 ? 'round' : r < 0.9 ? 'birch' : r < 0.96 ? 'bush' : 'rock';
-        trees.push({ x: x + 0.2 + hash2(x, y, 60 + i) * 0.6, y: y + 0.2 + hash2(x, y, 70 + i) * 0.6, kind, seed: Math.floor(r * 10000) });
+        trees.push({ x: x + 0.2 + hash2(x, y, 60 + i) * 0.6, y: y + 0.2 + hash2(x, y, 70 + i) * 0.6, z: lvl(x, y) * HSTEP, kind, seed: Math.floor(r * 10000) });
       }
     }
   }
@@ -245,7 +280,8 @@ export function buildTerrain(blocks: BlockView[], buildings: Rect[], biome: Biom
     if (hash2(x, y, 77) > 0.985 && x + y > bounds.minX + bounds.minY + 20) boats.push({ x: x + 0.5, y: y + 0.5 });
   }
 
-  return { canvas: px.done(), offsetX: sxMin, offsetY: syMin, land, roads, trees, lamps: dedupLamps, signs, lighthouse, boats, bounds, biome };
+  const height = new Map([...level].map(([k, v]) => [k, v * HSTEP]));
+  return { canvas: px.done(), offsetX: sxMin, offsetY: syMin, land, roads, trees, lamps: dedupLamps, signs, lighthouse, boats, bounds, biome, height };
 }
 
 /** Tileable deep-water pattern for the open sea background. */

@@ -628,6 +628,19 @@ export function boatArt(): SpriteArt {
 }
 
 /** Walking villager, 2 frames. */
+/** Small car on a road tile, oriented along the x or y tile axis. */
+export function carArt(body: RGB, alongX: boolean): SpriteArt {
+  const px = canvasFor(1, 1, 12, 3);
+  const [x0, y0, x1, y1] = alongX ? [0.2, 0.36, 0.8, 0.62] : [0.38, 0.2, 0.64, 0.8];
+  px.box(x0, y0, x1, y1, 1, 5, faces(body));
+  const inset = 0.08;
+  const [cx0, cy0, cx1, cy1] = alongX ? [x0 + 0.14, y0 + inset * 0.3, x1 - 0.16, y1 - inset * 0.3] : [x0 + inset * 0.3, y0 + 0.14, x1 - inset * 0.3, y1 - 0.16];
+  px.box(cx0, cy0, cx1, cy1, 5, 8, { top: shade(body, 1.15), left: hex(0x9fd3ff), right: hex(0x6fa8d8) });
+  px.outline(OUT);
+  const top = px.p(0.5, 0.5, 9);
+  return { canvas: px.done(), ox: px.ox, oy: px.oy, top: [top[0], top[1]] };
+}
+
 export function personArt(shirt: RGB, frame: 0 | 1, carry: RGB | null): SpriteArt {
   const px = new Px(12, 16, 6, 15);
   px.rect(3, 14, 6, 2, [10, 20, 10], 70);

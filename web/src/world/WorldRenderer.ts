@@ -4,11 +4,11 @@ import { BLOCK_PITCH, BRIDGE_TYPES } from '@berrie/shared';
 import { effectiveHealth } from '@berrie/shared';
 import {
   buildingArt, ruinsArt, scaffoldArt, treeArt, rockArt, lampArt, signpostArt, lighthouseArt, boatArt, personArt,
-  vanArt, cloudArt, glowCanvas, markerArt, type SpriteArt,
+  vanArt, cloudArt, glowCanvas, markerArt, carArt, type SpriteArt,
 } from './art';
 import { buildTerrain, seaPattern, roadPath, nearestRoad, TREE_TINT, type Terrain, type Rect } from './terrain';
 import { capacityTier, hostFacts, pressure } from '../ui/facts';
-import { TW, TH, hex, hashStr } from './pixel';
+import { TW, TH, hex, hashStr, hash2 } from './pixel';
 import { HEALTH_COLOR, hexNum, iconSvg, statusText, esc } from '../ui/status';
 
 TextureSource.defaultOptions.scaleMode = 'nearest';
@@ -113,6 +113,19 @@ interface Courier {
   done: boolean;
 }
 
+interface Car { sprite: Sprite; glow: Sprite; district: string; from: [number, number]; to: [number, number]; prev: string | null; t: number; color: number }
+
+const CAR_COLORS = [0xd94b3d, 0x3d7fd9, 0xf2c14a, 0xe8e8e8, 0x2f3a4a, 0x3fa36a];
+
+/**
+ * Cars reflect *measured* network traffic of the island's server (collector rx+tx), on a log scale.
+ * No measurement (or a stale one) means no moving cars: the map never invents activity.
+ */
+export function carsForTraffic(bps: number | null): number {
+  if (bps === null || bps < 2000) return 0;
+  return Math.max(1, Math.min(14, Math.round(Math.log10(bps / 1000) * 2.5)));
+}
+
 interface Particle { s: Sprite; vx: number; vy: number; life: number; max: number; grow: number }
 
 const PROBLEM: Health[] = ['unhealthy', 'unreachable', 'degraded', 'restarting'];
@@ -131,6 +144,7 @@ export class WorldRenderer {
   private highlight = new Graphics();
   private ferries = new Map<string, Sprite>();
   private ferryTrips = new Map<string, { start: number; reverse: boolean }>();
+  private cars: Car[] = [];
   private dragIsland: { district: string; start: [number, number]; delta: [number, number] } | null = null;
   private rings = new Graphics();
   private objects = new Container();
@@ -236,6 +250,7 @@ export class WorldRenderer {
     for (const e of withBuildings) { seen.add(e.id); this.syncBuilding(e, s, this.placed(e)); }
     for (const [id, n] of this.nodes) if (!seen.has(id)) { n.root.destroy({ children: true }); n.label.remove(); this.nodes.delete(id); }
     this.drawLinks();
+    this.syncCars(s);
     this.drawRings();
     this.placeLabels();
     if (!this.fitted && this.terrain) {
@@ -257,7 +272,7 @@ export class WorldRenderer {
     const tint = TREE_TINT[biome] ?? 0xffffff;
     for (const tr of t.trees) {
       const a = tr.kind === 'rock' ? this.art(`rock${tr.seed % 3}`, () => rockArt(tr.seed % 3)) : this.art(`${tr.kind}${tr.seed % 5}`, () => treeArt(tr.kind as 'pine', tr.seed % 5));
-      const p = this.addProp(a, `t:${tr.kind}${tr.seed % 5}${tr.kind === 'rock' ? 'r' : ''}`, tr.x, tr.y);
+      const p = this.addProp(a, `t:${tr.kind}${tr.seed % 5}${tr.kind === 'rock' ? 'r' : ''}`, tr.x, tr.y, tr.z);
       if (tr.kind !== 'rock' && (biome !== 'autumn' || tr.kind !== 'pine')) p.tint = tint;
       isl.props.push(p);
     }
@@ -273,6 +288,16 @@ export class WorldRenderer {
       isl.glows.push(g);
     }
     for (const sgn of t.signs) isl.props.push(this.addProp(this.art('sign', signpostArt), 'sign', sgn.x, sgn.y));
+    // Parked cars at the curb: static scenery only (they do not move and imply no activity).
+    for (const r of t.roads) {
+      const [x, y] = r.split(',').map(Number);
+      if (hash2(x, y, 404) > 0.06) continue;
+      const alongX = t.roads.has(`${x + 1},${y}`) || t.roads.has(`${x - 1},${y}`);
+      const color = CAR_COLORS[Math.floor(hash2(x, y, 405) * CAR_COLORS.length)];
+      const a = this.art(`car${color}${alongX ? 'x' : 'y'}`, () => carArt(hex(color), alongX));
+      const off = alongX ? [0, 0.3] : [0.3, 0];
+      isl.props.push(this.addProp(a, `car${color}${alongX ? 'x' : 'y'}`, x + off[0], y + off[1]));
+    }
     if (t.lighthouse) isl.props.push(this.addProp(this.art('lighthouse', lighthouseArt), 'lighthouse', t.lighthouse.x, t.lighthouse.y));
     for (const b of t.boats) {
       const c = this.addProp(this.art('boat', boatArt), 'boat', b.x, b.y);
@@ -302,9 +327,9 @@ export class WorldRenderer {
     this.terrain = { roads, land, islands: ts, offsetX: x0, offsetY: y0, width: x1 - x0, height: y1 - y0 };
   }
 
-  private addProp(a: SpriteArt, key: string, x: number, y: number): Sprite {
+  private addProp(a: SpriteArt, key: string, x: number, y: number, z = 0): Sprite {
     const s = new Sprite(this.artTex(`prop:${key}`, a));
-    s.position.set(isoX(x, y) - a.ox, isoY(x, y) - a.oy);
+    s.position.set(isoX(x, y) - a.ox, isoY(x, y) - a.oy - z);
     s.zIndex = (x + y) * 10;
     this.objects.addChild(s);
     this.props.push(s);
@@ -424,6 +449,80 @@ export class WorldRenderer {
     }
   }
 
+  // ------------------------------------------------------------------ traffic (driven by measured network throughput)
+
+  private syncCars(s: RenderState): void {
+    const want = new Map<string, number>();
+    for (const e of s.entities) {
+      if (e.kind !== 'host') continue;
+      const f = hostFacts(e)?.network;
+      const fresh = f && f.status === 'confirmed' && f.ts && Date.now() - Date.parse(f.ts) < 10 * 60_000;
+      const bps = fresh && f.value ? f.value.interfaces.reduce((t, i) => t + (i.rxBps ?? 0) + (i.txBps ?? 0), 0) : null;
+      want.set(e.id, carsForTraffic(bps));
+    }
+    for (const [d, isl] of this.islands) {
+      const n = want.get(d) ?? 0;
+      const mine = this.cars.filter((c) => c.district === d);
+      for (const c of mine.slice(n)) this.removeCar(c);
+      const roads = [...isl.terrain.roads];
+      for (let i = mine.length; i < n && roads.length; i++) {
+        const [x, y] = roads[Math.floor(Math.random() * roads.length)].split(',').map(Number);
+        const color = CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
+        const sprite = new Sprite();
+        const glow = new Sprite(this.texFrom('glow-head', () => glowCanvas('rgba(255,240,190,0.95)', 24)));
+        glow.anchor.set(0.5);
+        glow.blendMode = 'add';
+        this.objects.addChild(sprite);
+        this.lights.addChild(glow);
+        const car: Car = { sprite, glow, district: d, from: [x, y], to: [x, y], prev: null, t: 1, color };
+        this.cars.push(car);
+      }
+    }
+    for (const c of this.cars.filter((x) => !this.islands.has(x.district))) this.removeCar(c);
+  }
+
+  private removeCar(c: Car): void {
+    c.sprite.destroy();
+    c.glow.destroy();
+    this.cars = this.cars.filter((x) => x !== c);
+  }
+
+  private moveCars(ds: number): void {
+    for (const c of this.cars) {
+      const roads = this.islands.get(c.district)?.terrain.roads;
+      if (!roads) continue;
+      c.t += ds * 1.3;
+      if (c.t >= 1) {
+        // pick the next road tile, preferring not to turn back
+        const [x, y] = c.to;
+        const next = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [x + dx, y + dy] as [number, number]).filter(([nx, ny]) => roads.has(`${nx},${ny}`));
+        const forward = next.filter(([nx, ny]) => `${nx},${ny}` !== c.prev);
+        const pick = (forward.length ? forward : next)[Math.floor(Math.random() * (forward.length || next.length))];
+        if (!pick) continue;
+        c.prev = `${x},${y}`;
+        c.from = [x, y];
+        c.to = pick;
+        c.t = 0;
+        const alongX = pick[0] !== x;
+        const key = `car${c.color}${alongX ? 'x' : 'y'}`;
+        c.sprite.texture = this.artTex(`prop:${key}`, this.art(key, () => carArt(hex(c.color), alongX)));
+      }
+      const alongX = c.to[0] !== c.from[0];
+      const dir = alongX ? Math.sign(c.to[0] - c.from[0]) : Math.sign(c.to[1] - c.from[1]);
+      // keep right: offset perpendicular to the direction of travel
+      const lane = 0.17 * dir;
+      const px = c.from[0] + (c.to[0] - c.from[0]) * c.t + (alongX ? 0 : -lane);
+      const py = c.from[1] + (c.to[1] - c.from[1]) * c.t + (alongX ? lane : 0);
+      const a = this.artCache.get(`car${c.color}${alongX ? 'x' : 'y'}`);
+      c.sprite.position.set(isoX(px, py) - (a?.ox ?? 0), isoY(px, py) - (a?.oy ?? 0));
+      c.sprite.zIndex = (px + py + 1) * 10 + 5;
+      const ahead = [px + 0.5 + (alongX ? dir * 0.45 : 0), py + 0.5 + (alongX ? 0 : dir * 0.45)];
+      c.glow.position.set(isoX(ahead[0], ahead[1]), isoY(ahead[0], ahead[1]) - 3);
+      c.glow.alpha = this.darkness * 0.8;
+      c.glow.visible = this.darkness > 0.15;
+    }
+  }
+
   // ------------------------------------------------------------------ topology: bridges, ferries, routes, highlights
 
   private centre(id: string): [number, number] | null {
@@ -518,29 +617,86 @@ export class WorldRenderer {
     g.stroke({ width, color, alpha });
   }
 
-  /** Plank bridge across the water. Unverified links are translucent with gaps, so they never look like a real bridge. */
-  private bridge(c: ConnectionView, p: [number, number], q: [number, number], verified: boolean, bad: boolean, selected: boolean): Graphics {
+  /**
+   * Isometric bridge across the water: an arched plank deck on stone pillars with railings (verified links), or a sagging
+   * rope bridge with gaps (anything not verified), so an unconfirmed relationship never looks like solid infrastructure.
+   */
+  private bridge(c: ConnectionView, p0: [number, number], q0: [number, number], verified: boolean, bad: boolean, selected: boolean): Graphics {
     const g = new Graphics();
-    const [ax, ay] = this.iso(p), [bx, by] = this.iso(q);
-    const len = Math.hypot(bx - ax, by - ay) || 1;
-    const nx = -(by - ay) / len, ny = (bx - ax) / len;
-    const w = 7;
-    const deck = [ax + nx * w, ay + ny * w, bx + nx * w, by + ny * w, bx - nx * w, by - ny * w, ax - nx * w, ay - ny * w];
-    const wood = 0x8a6a44, rail = bad ? 0xef4b4b : selected ? 0x7fd6ff : 0x5a4330;
-    const alpha = verified ? 1 : 0.45;
-    if (verified) g.poly(deck).fill({ color: wood, alpha });
-    const planks = Math.floor(len / 3);
-    for (let i = 0; i < planks; i++) {
-      if (!verified && i % 3 === 2) continue; // gaps: not a confirmed bridge
-      const t = i / planks, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-      g.moveTo(x + nx * w, y + ny * w).lineTo(x - nx * w, y - ny * w);
+    const len0 = Math.hypot(q0[0] - p0[0], q0[1] - p0[1]) || 1;
+    const d: [number, number] = [(q0[0] - p0[0]) / len0, (q0[1] - p0[1]) / len0];
+    // land a little onto each island
+    const p: [number, number] = [p0[0] - d[0] * 0.7, p0[1] - d[1] * 0.7], q: [number, number] = [q0[0] + d[0] * 0.7, q0[1] + d[1] * 0.7];
+    const len = len0 + 1.4;
+    const n: [number, number] = [-d[1], d[0]];
+    const w = verified ? 0.42 : 0.3;
+    const arch = verified ? Math.min(16, 4 + len * 0.5) : -Math.min(6, len * 0.25); // rope bridges sag
+    const z = (t: number) => (verified ? 2 : 1) + Math.sin(Math.PI * t) * arch;
+    const pt = (t: number, side: number, lift = 0): [number, number] => {
+      const x = p[0] + (q[0] - p[0]) * t + n[0] * w * side, y = p[1] + (q[1] - p[1]) * t + n[1] * w * side;
+      return [isoX(x, y), isoY(x, y) - z(t) - lift];
+    };
+    // the side nearer the viewer is drawn last
+    const near = pt(0.5, 1)[1] > pt(0.5, -1)[1] ? 1 : -1;
+    const segs = Math.max(6, Math.ceil(len * 3));
+    const wood = verified ? 0x9a7046 : 0xb8955e, woodDark = shadeNum(wood, 0.72), stone = 0x8d929b;
+    const railColor = bad ? 0xef5a4a : selected ? 0x7fd6ff : verified ? 0x5a3e28 : 0xc9b48a;
+    const alpha = verified ? 1 : 0.85;
+    const SEA = -12; // sea surface relative to island top (cliff height)
+    if (verified) {
+      // stone pillars in the water, every ~3 tiles, skipping the ends on land
+      const pillars = Math.max(1, Math.floor(len / 3));
+      for (let k = 1; k <= pillars; k++) {
+        const t = k / (pillars + 1);
+        for (const side of [-near, near]) {
+          const [x, y] = pt(t, side * 0.75);
+          const bottom = y + z(t) - SEA;
+          g.rect(x - 2, y, 4, bottom - y).fill({ color: side === near ? stone : shadeNum(stone, 0.78) });
+          g.ellipse(x, bottom, 4, 1.5).fill({ color: 0xd8f1f7, alpha: 0.8 });
+        }
+      }
     }
-    g.stroke({ width: 1.5, color: shadeNum(wood, 1.25), alpha });
-    for (const side of [1, -1]) g.moveTo(ax + nx * w * side, ay + ny * w * side - 3).lineTo(bx + nx * w * side, by + ny * w * side - 3);
-    g.stroke({ width: selected ? 3 : 2, color: rail, alpha: verified ? 0.95 : 0.7 });
+    // far rail first
+    const rail = (side: number) => {
+      const posts = Math.max(3, Math.ceil(len / 0.8));
+      if (verified) {
+        for (let i = 0; i <= posts; i++) { const t = i / posts; const [x, y] = pt(t, side); g.moveTo(x, y).lineTo(x, y - 5); }
+        g.stroke({ width: 1.4, color: railColor, alpha });
+        const top = Array.from({ length: segs + 1 }, (_, i) => pt(i / segs, side, 5));
+        g.moveTo(top[0][0], top[0][1]);
+        for (const [x, y] of top.slice(1)) g.lineTo(x, y);
+        g.stroke({ width: selected ? 2.2 : 1.6, color: railColor, alpha });
+      } else {
+        // rope: posts only at both ends, droopy line
+        for (const t of [0, 1]) { const [x, y] = pt(t, side); g.moveTo(x, y).lineTo(x, y - 7); }
+        g.stroke({ width: 1.6, color: 0x7a5a38, alpha });
+        const top = Array.from({ length: segs + 1 }, (_, i) => { const t = i / segs; const [x, y] = pt(t, side, 7); return [x, y + Math.sin(Math.PI * t) * 3] as [number, number]; });
+        g.moveTo(top[0][0], top[0][1]);
+        for (const [x, y] of top.slice(1)) g.lineTo(x, y);
+        g.stroke({ width: 1, color: railColor, alpha: 0.9 });
+      }
+    };
+    rail(-near);
+    // deck: one quad per segment, planks across, alternating shade; rope bridges leave gaps
+    for (let i = 0; i < segs; i++) {
+      if (!verified && i % 3 === 2) continue;
+      const t0 = i / segs, t1 = (i + (verified ? 1 : 0.7)) / segs;
+      const a = pt(t0, -1), b = pt(t0, 1), cc = pt(t1, 1), dd = pt(t1, -1);
+      g.poly([...a, ...b, ...cc, ...dd]).fill({ color: i % 2 ? wood : shadeNum(wood, 1.08), alpha });
+    }
+    // deck edge (thickness) on the near side
+    if (verified) {
+      const edge = Array.from({ length: segs + 1 }, (_, i) => pt(i / segs, near));
+      g.moveTo(edge[0][0], edge[0][1]);
+      for (const [x, y] of edge.slice(1)) g.lineTo(x, y);
+      g.stroke({ width: 2, color: woodDark, alpha });
+    }
+    rail(near);
+    if (bad) { const [x, y] = pt(0.5, near, 9); g.circle(x, y, 2).fill({ color: 0xef4b4b }); }
+    const outline = [...Array.from({ length: segs + 1 }, (_, i) => pt(i / segs, -1)), ...Array.from({ length: segs + 1 }, (_, i) => pt(1 - i / segs, 1))].flat();
     g.eventMode = 'static';
     g.cursor = 'pointer';
-    g.hitArea = new Polygon(deck);
+    g.hitArea = new Polygon(outline);
     g.on('pointertap', () => { if (!this.dragMoved) this.cb.onSelectConnection?.(c.id); });
     return g;
   }
@@ -773,6 +929,7 @@ export class WorldRenderer {
       }
       if (n.scaffold && Math.random() < ds * 1.5) this.burst(n.rect.x + Math.random() * n.rect.w, n.rect.y + n.rect.h, 0xc8b890, 1);
     }
+    this.moveCars(ds);
     // couriers
     for (const c of this.couriers) {
       let i = Math.floor(c.t);
