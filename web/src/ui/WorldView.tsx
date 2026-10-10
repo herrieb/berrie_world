@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Alert, Biome, BuildingType, Health, Summary, WorldSnapshot } from '@berrie/shared';
 import { inMaintenance } from '@berrie/shared';
 import { useStore, matchesFilters, filtersActive, useRole } from '../state/store';
-import { onServerMessage, api, savePrefs } from '../state/api';
+import { onServerMessage, api, savePrefs, loadPersonal } from '../state/api';
 import { WorldRenderer } from '../world/WorldRenderer';
 import { Inspector } from './Inspector';
 import { ConnectionInspector } from './ConnectionInspector';
@@ -23,14 +23,20 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const [saving, setSaving] = useState<string | null>(null);
   const [arrange, setArrange] = useState(false);
   const [redrawing, setRedrawing] = useState(false);
-  const redraw = async () => {
+  const [confirmNewMap, setConfirmNewMap] = useState(false);
+  /** Viewers: run discovery and redraw. Operators: generate a new map (after confirmation). */
+  const redraw = async (newMap: boolean) => {
+    setConfirmNewMap(false);
     setRedrawing(true);
     try {
-      await api('/api/discovery/run', { method: 'POST' });
+      if (newMap) await api('/api/layout/regenerate', { method: 'POST', json: { confirm: 'new map' } });
+      await api('/api/discovery/run', { method: 'POST' }).catch(() => undefined);
       const snap = await api<WorldSnapshot>('/api/snapshot');
       useStore.getState().apply({ t: 'snapshot', data: snap });
+      if (newMap) await loadPersonal();
       rendererRef.current?.redraw();
-      setToast('Map redrawn from a fresh discovery.');
+      if (newMap) rendererRef.current?.fit();
+      setToast(newMap ? 'New map generated: every island and building has a new place.' : 'Map redrawn from a fresh discovery.');
     } catch (e) {
       setToast((e as Error).message);
       rendererRef.current?.redraw();
@@ -166,7 +172,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         <button onClick={() => rendererRef.current?.zoomBy(1.25)} title="Zoom in (+)"><Icon name="plus" /></button>
         <button onClick={() => rendererRef.current?.zoomBy(0.8)} title="Zoom out (−)"><Icon name="minus" /></button>
         <button onClick={() => rendererRef.current?.fit()} title="Fit village"><Icon name="target" /></button>
-        <button onClick={() => void redraw()} disabled={redrawing} className={redrawing ? 'spinning' : ''} title="Redraw the map: run discovery now and regenerate the islands (changes nothing on your servers)"><Icon name="restart" /></button>
+        <button onClick={() => (canOperate ? setConfirmNewMap(true) : void redraw(false))} disabled={redrawing} className={redrawing ? 'spinning' : ''} title={canOperate ? 'Redraw: generate a new map (new random positions for all islands and buildings)' : 'Redraw the map from a fresh discovery'}><Icon name="restart" /></button>
         {hosts.length > 1 && <button className={arrange ? 'on' : ''} onClick={() => { setArrange(!arrange); if (s.editLayout) s.setEditLayout(false); }} title="Arrange islands (personal — only changes your own map)"><Icon name="anchor" /></button>}
         {canOperate && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
       </div>
@@ -179,6 +185,24 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       )}
       {s.editLayout && <div className="edit-banner">Layout editor: drag a building to a free spot. Positions are saved and pinned.<button onClick={() => s.setEditLayout(false)}>Done</button></div>}
       {toast && <div className="toast">{toast}</div>}
+      {confirmNewMap && (
+        <div className="modal-backdrop" onClick={() => setConfirmNewMap(false)}>
+          <div className="modal card" onClick={(ev) => ev.stopPropagation()} role="dialog" aria-modal="true">
+            <h3>Generate a new map?</h3>
+            <p>Every island gets a new, properly spaced place, and all buildings are placed again at random on their own island. This changes the map for everyone.</p>
+            <ul className="small">
+              <li>Buildings you moved by hand lose their position.</li>
+              <li>Personal island arrangements are reset.</li>
+              <li>Services, health, history and your servers are not touched.</li>
+            </ul>
+            <div className="row-end">
+              <button onClick={() => void redraw(false)}>Just refresh</button>
+              <button onClick={() => setConfirmNewMap(false)}>Cancel</button>
+              <button className="primary" onClick={() => void redraw(true)}>Generate new map</button>
+            </div>
+          </div>
+        </div>
+      )}
       {s.replay && (() => {
         const r = s.replay;
         const t0 = Date.parse(r.from), t1 = Date.parse(r.to);

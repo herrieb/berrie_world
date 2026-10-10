@@ -225,6 +225,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     return { ok: true, tookMs: Date.now() - started, at: new Date().toISOString() };
   });
 
+  app.post('/api/layout/regenerate', {
+    preHandler: operator,
+    schema: { body: { type: 'object', additionalProperties: false, required: ['confirm'], properties: { confirm: { type: 'string', enum: ['new map'] } } } },
+  }, async (req) => {
+    const p = me(req);
+    const r = world.regenerateLayout(p.user.username);
+    // Personal island arrangements referred to the old map; clear them so islands cannot end up overlapping.
+    for (const u of repo.users.list()) {
+      const prefs = repo.users.getPrefs(u.id);
+      if (prefs.islandOffsets || prefs.camera) repo.users.setPrefs(u.id, { ...prefs, islandOffsets: undefined, camera: undefined });
+    }
+    repo.audit({ ...auth.actor(p), ip: req.ip, action: 'layout.regenerate', entityId: null, params: r, result: 'ok' });
+    return { ok: true, ...r };
+  });
+
   app.get('/api/archive', async (req) => {
     const p = me(req);
     return { entities: repo.listArchived(500).filter((e) => entityVisible(p, e)).map((e) => repo.toView(e)) };

@@ -7,6 +7,7 @@ import { loadConfig } from '../src/config.js';
 import { buildApp, type App } from '../src/app.js';
 import type { InventoryResult, ObservedEntity } from '../src/core/world.js';
 import { signIn } from './helpers.js';
+import { ISLAND_PITCH } from '../src/db/repo.js';
 
 const svc = (host: string, name: string, deps: string[] = [], type: ObservedEntity['buildingType'] = 'house'): ObservedEntity => ({
   id: `docker:${host}:app/${name}`, kind: 'service', name, buildingType: type, parentId: `host:${host}`, hostId: `host:${host}`,
@@ -167,6 +168,37 @@ describe('topology: bridges, ferries, gateways and impact', () => {
     expect(r.json().ok).toBe(true);
     expect((await app.http.inject({ method: 'POST', url: '/api/discovery/run', headers: { cookie: viewer } })).statusCode).toBe(429);
     expect(app.repo.listAudit(20).some((a: { action: string }) => a.action === 'discovery.run')).toBe(true);
+  });
+
+  it('"new map" re-places every island and building with proper spacing, keeping entities and history', async () => {
+    report('alpha', { cloudflared: 'active' });
+    await cycle();
+    // Simulate an island placed by the old 35-tile spacing, overlapping alpha's island.
+    app.repo.db.prepare("UPDATE districts SET ox = 35, oy = -35 WHERE key = 'external'").run();
+    const before = { entities: app.repo.listEntities(true).length, events: app.repo.listEvents({ limit: 500 }).length };
+    const viewer = await signIn(app, 'viewer');
+    const op = await signIn(app, 'operator');
+    await app.http.inject({ method: 'PUT', url: '/api/account/prefs', headers: { cookie: viewer }, payload: { islandOffsets: { 'host:alpha': { dx: 7, dy: 0 } } } });
+    expect((await app.http.inject({ method: 'POST', url: '/api/layout/regenerate', headers: { cookie: viewer }, payload: { confirm: 'new map' } })).statusCode).toBe(403);
+    expect((await app.http.inject({ method: 'POST', url: '/api/layout/regenerate', headers: { cookie: op }, payload: {} })).statusCode).toBe(400);
+    const r = await app.http.inject({ method: 'POST', url: '/api/layout/regenerate', headers: { cookie: op }, payload: { confirm: 'new map' } });
+    expect(r.statusCode).toBe(200);
+    const origins = (app.repo.db.prepare('SELECT ox, oy FROM districts').all() as { ox: number; oy: number }[]);
+    for (let i = 0; i < origins.length; i++) for (let j = i + 1; j < origins.length; j++) {
+      expect(Math.max(Math.abs(origins[i].ox - origins[j].ox), Math.abs(origins[i].oy - origins[j].oy))).toBeGreaterThanOrEqual(ISLAND_PITCH * 0.6);
+    }
+    const s = await snapshot();
+    const placed = s.entities.filter((e) => e.kind !== 'project' && !(e.kind === 'endpoint' && e.parentId && s.entities.find((p) => p.id === e.parentId)?.kind === 'service'));
+    expect(placed.every((e) => e.layout)).toBe(true);
+    const rects = placed.map((e) => e.layout!);
+    for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i], b = rects[j];
+      expect(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h).toBe(false);
+    }
+    expect(app.repo.listEntities(true).length).toBe(before.entities);
+    expect(app.repo.listEvents({ limit: 500 }).length).toBeGreaterThan(before.events);
+    expect((await app.http.inject({ method: 'GET', url: '/api/account/prefs', headers: { cookie: viewer } })).json().prefs.islandOffsets).toBeUndefined();
+    expect(app.repo.listAudit(20).some((a: { action: string }) => a.action === 'layout.regenerate')).toBe(true);
   });
 
   it('users only see relationships whose both ends they may see', async () => {

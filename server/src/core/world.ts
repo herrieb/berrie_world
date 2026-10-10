@@ -541,12 +541,39 @@ export class World {
   }
 
   /** Give every entity that needs a building a persistent position. Never moves existing buildings. */
-  ensureLayout(): void {
+  /**
+   * Explicit "generate a new map" (operator action): forget all positions — island origins, city blocks, building
+   * plots and manual pins — and place everything again with islands in random order and buildings in random order.
+   * Entities, health and history are untouched; only the shared layout changes.
+   */
+  regenerateLayout(by: string, rand: () => number = Math.random): { islands: number; buildings: number } {
+    const shuffle = <T,>(a: T[]) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+    let buildings = 0;
+    this.repo.tx(() => {
+      this.repo.db.prepare('DELETE FROM layout').run();
+      this.repo.db.prepare('DELETE FROM blocks').run();
+      this.repo.db.prepare('DELETE FROM districts').run();
+      const all = this.repo.listEntities().filter((e) => e.lifecycle !== 'archived');
+      // Reserve island origins in random order (properly spaced by islandSlot).
+      const districts = shuffle([...new Set(all.map((e) => (e.kind === 'host' ? e.id : e.hostId ?? 'external')))]);
+      for (const d of districts) this.repo.districtOrigin(d);
+      this.ensureLayout(shuffle);
+      buildings = this.repo.listLayouts().length;
+      this.blocksDirty = true;
+      for (const e of all) this.dirty.add(e.id);
+      this.emit({ type: 'layout.moved', entityId: null, source: by, severity: 'notice', details: { regenerated: true, islands: districts.length, buildings, by } });
+    });
+    this.flush();
+    return { islands: (this.repo.db.prepare('SELECT COUNT(*) n FROM districts').get() as { n: number }).n, buildings };
+  }
+
+  ensureLayout(shuffle?: <T>(a: T[]) => T[]): void {
     const all = this.repo.listEntities(true);
     const byId = new Map(all.map((e) => [e.id, e]));
     const layouts = new Map(this.repo.listLayouts().map((l) => [l.entityId, l]));
-    // Hosts first so their blocks are reserved, then by first sighting for determinism.
-    const order = [...all].sort((a, b) => (a.kind === 'host' ? 0 : 1) - (b.kind === 'host' ? 0 : 1) || a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
+    // Hosts first so their blocks are reserved, then by first sighting for determinism (or randomly for a new map).
+    const rest = all.filter((e) => e.kind !== 'host').sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
+    const order = [...all.filter((e) => e.kind === 'host'), ...(shuffle ? shuffle(rest) : rest)];
     for (const e of order) {
       const need = this.needsBuilding(e, byId);
       const has = layouts.get(e.id);
