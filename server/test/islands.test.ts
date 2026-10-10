@@ -12,6 +12,11 @@ import type { Transport } from '../src/adapters/ssh.js';
 import { SshTransport, HostKeyMismatchError } from '../src/adapters/ssh.js';
 import { ISLAND_PITCH } from '../src/db/repo.js';
 import { signIn } from './helpers.js';
+import { setDnsLookup } from '../src/adapters/config.js';
+
+// Public hostnames in these tests "resolve" unless listed here (no real DNS in tests).
+const NO_DNS = new Set<string>();
+setDnsLookup(async (h) => { if (NO_DNS.has(h)) throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }); return { address: '192.0.2.1' }; });
 
 // ---------- fakes: a Docker API server and an SSH transport that runs a canned collector ----------
 
@@ -309,6 +314,15 @@ describe('server islands and Server Harbor', () => {
     expect(snap.connections.find((c) => c.type === 'internet' && c.dst === 'gateway:pi:cloudflared')!.verification).toBe('verified');
     const route = (await req('GET', `/api/entities/${encodeURIComponent('endpoint:tv.example.com')}/route`)).json() as { routes: { entityId: string }[][] };
     expect(route.routes[0].map((h) => h.entityId)).toEqual(['endpoint:tv.example.com', 'external:cloudflare-edge', 'gateway:pi:cloudflared']);
+    // A route whose DNS record was deleted is not public: it leaves the map (missing first), and nothing else changes.
+    NO_DNS.add('cam.example.com');
+    setDnsLookup(async (h) => { if (NO_DNS.has(h)) throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }); return { address: '192.0.2.1' }; });
+    await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!);
+    await cycle();
+    const afterDns = await snapshot();
+    expect(afterDns.entities.find((e) => e.id === 'endpoint:cam.example.com')?.lifecycle).toMatch(/missing|removed/);
+    expect(afterDns.entities.find((e) => e.id === 'endpoint:tv.example.com')!.lifecycle).not.toMatch(/missing|removed/);
+    NO_DNS.clear();
     // The collector goes silent: the hostnames and the gateway stay (stale is not removed).
     FakeSsh.fail = 'network';
     for (let i = 0; i < 5; i++) { await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!); await cycle(); }

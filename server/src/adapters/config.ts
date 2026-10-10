@@ -90,7 +90,12 @@ export async function endpointInventory(cfg: AppConfig, repo: Repo, reported: Ma
   for (const [hostId, rep] of reported) {
     if (Date.now() - Date.parse(rep.ts) > 10 * 60_000) stale = true; // keep the last known routes, but never treat absence as removal
     const local = services.filter((x) => x.hostId === hostEntityId(hostId));
-    for (const r of rep.rules) found.set(r.hostname, { hostname: r.hostname, target: matchIngress(r.service, local), via: `cloudflared on ${hostId}`, host: hostId });
+    const states = await Promise.all(rep.rules.map((r) => dnsState(r.hostname)));
+    rep.rules.forEach((r, i) => {
+      // A route whose hostname has no DNS record is not publicly reachable: not an endpoint (re-appears if DNS returns).
+      if (states[i] === 'no-record') return;
+      found.set(r.hostname, { hostname: r.hostname, target: matchIngress(r.service, local), via: `cloudflared on ${hostId}`, host: hostId });
+    });
   }
 
   const { rules, errors } = await readTunnelIngress(cfg.tunnelConfigPaths);
@@ -134,16 +139,23 @@ export async function endpointInventory(cfg: AppConfig, repo: Repo, reported: Ma
 
 const dnsCache = new Map<string, { at: number; dns: HostnameHint['dns'] }>();
 
+/** Cached DNS state of a hostname: 'no-record' only for a definitive "does not exist" (ENOTFOUND). */
+let dnsLookup: (hostname: string) => Promise<unknown> = (h) => lookup(h);
+/** Tests replace the resolver so they never depend on the real network. */
+export function setDnsLookup(fn: (hostname: string) => Promise<unknown>): void { dnsLookup = fn; dnsCache.clear(); }
+
+export async function dnsState(hostname: string): Promise<HostnameHint['dns']> {
+  const cached = dnsCache.get(hostname);
+  if (cached && Date.now() - cached.at < 30 * 60_000) return cached.dns;
+  let dns: HostnameHint['dns'] = 'unknown';
+  try { await dnsLookup(hostname); dns = 'resolves'; } catch (err) { dns = (err as { code?: string }).code === 'ENOTFOUND' ? 'no-record' : 'unknown'; }
+  dnsCache.set(hostname, { at: Date.now(), dns });
+  return dns;
+}
+
 export async function hintStatus(cfg: AppConfig, repo: Repo): Promise<HostnameHint[]> {
   const all = repo.listEntities();
-  const resolveDns = async (hostname: string): Promise<HostnameHint['dns']> => {
-    const cached = dnsCache.get(hostname);
-    if (cached && Date.now() - cached.at < 30 * 60_000) return cached.dns;
-    let dns: HostnameHint['dns'] = 'unknown';
-    try { await lookup(hostname); dns = 'resolves'; } catch (err) { dns = (err as { code?: string }).code === 'ENOTFOUND' ? 'no-record' : 'unknown'; }
-    dnsCache.set(hostname, { at: Date.now(), dns });
-    return dns;
-  };
+  const resolveDns = dnsState;
   return Promise.all(cfg.hints.map(async (raw) => {
     const hostname = raw.toLowerCase();
     const ep = all.find((e) => e.kind === 'endpoint' && e.hostnames.includes(hostname));
