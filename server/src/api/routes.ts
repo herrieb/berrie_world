@@ -210,6 +210,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: Ctx): Promise<vo
     return { ...r, items };
   });
 
+  // ---------- run discovery now (read-only: inventories, collectors, topology; nothing is changed on servers) ----------
+  let lastManualRun = 0;
+  app.post('/api/discovery/run', async (req, reply) => {
+    const p = me(req);
+    if (Date.now() - lastManualRun < 15_000) return reply.code(429).send({ error: 'discovery just ran — try again in a few seconds' });
+    lastManualRun = Date.now();
+    const started = Date.now();
+    // Fresh collector pass for SSH servers (bounded), then a full discovery cycle.
+    const ssh = scheduler.hosts.resolve().filter((h) => h.status === 'active' && h.method === 'ssh' && auth.canHost(p, h.entityId));
+    await Promise.race([Promise.allSettled(ssh.map((h) => scheduler.hosts.collect(h))), new Promise((r) => setTimeout(r, 30_000))]);
+    await scheduler.cycle();
+    repo.audit({ ...auth.actor(p), ip: req.ip, action: 'discovery.run', entityId: null, result: 'ok' });
+    return { ok: true, tookMs: Date.now() - started, at: new Date().toISOString() };
+  });
+
   app.get('/api/archive', async (req) => {
     const p = me(req);
     return { entities: repo.listArchived(500).filter((e) => entityVisible(p, e)).map((e) => repo.toView(e)) };

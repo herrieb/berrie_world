@@ -452,3 +452,6 @@ button:disabled:hover { border-color: var(--line-2); }
 .port-list li { display: grid; grid-template-columns: 56px 1fr auto; gap: 8px; font-size: 12px; padding: 2px 4px; border-radius: 4px; }
 .port-list li.warn { background: rgba(242, 179, 61, 0.12); }
 .port-list small { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.controls button.spinning .icon { animation: spin 1s linear infinite; }

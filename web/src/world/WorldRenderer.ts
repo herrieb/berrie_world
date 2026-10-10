@@ -1007,6 +1007,13 @@ export class WorldRenderer {
 
   private settleTimer: number | undefined;
 
+  /** Regenerate every island (terrain, props, links) from the current state; the camera stays where it is. */
+  redraw(): void {
+    for (const d of [...this.islands.keys()]) this.destroyIsland(d);
+    this.terrain = null;
+    if (this.state) this.update(this.state);
+  }
+
   camera(): { x: number; y: number; zoom: number } {
     return { x: Math.round(this.cam.x), y: Math.round(this.cam.y), zoom: Math.round(this.cam.zoom * 100) / 100 };
   }

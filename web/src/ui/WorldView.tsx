@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Alert, Biome, BuildingType, Health, Summary } from '@berrie/shared';
+import type { Alert, Biome, BuildingType, Health, Summary, WorldSnapshot } from '@berrie/shared';
 import { inMaintenance } from '@berrie/shared';
 import { useStore, matchesFilters, filtersActive, useRole } from '../state/store';
 import { onServerMessage, api, savePrefs } from '../state/api';
@@ -22,6 +22,22 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const canOperate = useRole('operator');
   const [saving, setSaving] = useState<string | null>(null);
   const [arrange, setArrange] = useState(false);
+  const [redrawing, setRedrawing] = useState(false);
+  const redraw = async () => {
+    setRedrawing(true);
+    try {
+      await api('/api/discovery/run', { method: 'POST' });
+      const snap = await api<WorldSnapshot>('/api/snapshot');
+      useStore.getState().apply({ t: 'snapshot', data: snap });
+      rendererRef.current?.redraw();
+      setToast('Map redrawn from a fresh discovery.');
+    } catch (e) {
+      setToast((e as Error).message);
+      rendererRef.current?.redraw();
+    } finally {
+      setRedrawing(false);
+    }
+  };
   const list = useMemo(() => Object.values(s.entities), [s.entities]);
 
   useEffect(() => {
@@ -150,6 +166,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
         <button onClick={() => rendererRef.current?.zoomBy(1.25)} title="Zoom in (+)"><Icon name="plus" /></button>
         <button onClick={() => rendererRef.current?.zoomBy(0.8)} title="Zoom out (−)"><Icon name="minus" /></button>
         <button onClick={() => rendererRef.current?.fit()} title="Fit village"><Icon name="target" /></button>
+        <button onClick={() => void redraw()} disabled={redrawing} className={redrawing ? 'spinning' : ''} title="Redraw the map: run discovery now and regenerate the islands (changes nothing on your servers)"><Icon name="restart" /></button>
         {hosts.length > 1 && <button className={arrange ? 'on' : ''} onClick={() => { setArrange(!arrange); if (s.editLayout) s.setEditLayout(false); }} title="Arrange islands (personal — only changes your own map)"><Icon name="anchor" /></button>}
         {canOperate && <button className={s.editLayout ? 'on' : ''} onClick={() => s.setEditLayout(!s.editLayout)} title="Edit layout: drag buildings to move them"><Icon name="move" /></button>}
       </div>

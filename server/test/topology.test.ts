@@ -159,6 +159,16 @@ describe('topology: bridges, ferries, gateways and impact', () => {
     expect(conn(await snapshot(), 'vpn', 'host:alpha', 'host:beta')!.lifecycle).toBe('removed');
   });
 
+  it('"redraw the map" runs discovery now, is rate limited, audited and needs a session', async () => {
+    const viewer = await signIn(app, 'viewer');
+    expect((await app.http.inject({ method: 'POST', url: '/api/discovery/run' })).statusCode).toBe(401);
+    const r = await app.http.inject({ method: 'POST', url: '/api/discovery/run', headers: { cookie: viewer } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().ok).toBe(true);
+    expect((await app.http.inject({ method: 'POST', url: '/api/discovery/run', headers: { cookie: viewer } })).statusCode).toBe(429);
+    expect(app.repo.listAudit(20).some((a: { action: string }) => a.action === 'discovery.run')).toBe(true);
+  });
+
   it('users only see relationships whose both ends they may see', async () => {
     report('alpha', { peers: { k1: { HostName: 'beta', Online: true } }, cloudflared: 'active' });
     await cycle();
