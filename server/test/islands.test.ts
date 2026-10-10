@@ -323,6 +323,10 @@ describe('server islands and Server Harbor', () => {
     expect(afterDns.entities.find((e) => e.id === 'endpoint:cam.example.com')?.lifecycle).toMatch(/missing|removed/);
     expect(afterDns.entities.find((e) => e.id === 'endpoint:tv.example.com')!.lifecycle).not.toMatch(/missing|removed/);
     NO_DNS.clear();
+    // A restart keeps the last reported routes (nothing flaps to "missing").
+    const fresh = new (app.scheduler.hosts.constructor as never as new (...a: unknown[]) => { tunnelRoutes: Map<string, unknown> })(
+      (app.scheduler as never as { cfg: unknown }).cfg, app.repo, app.world, app.box, {}, undefined, false);
+    expect(fresh.tunnelRoutes.get('pi')).toBeDefined();
     // The collector goes silent: the hostnames and the gateway stay (stale is not removed).
     FakeSsh.fail = 'network';
     for (let i = 0; i < 5; i++) { await app.scheduler.hosts.collect(app.scheduler.hosts.get('pi')!); await cycle(); }

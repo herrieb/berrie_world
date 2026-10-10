@@ -67,7 +67,9 @@ export class HostManager {
     private readonly hooks: { onDockerEvent?: DockerEventHandler; log?: (msg: string, extra?: Record<string, unknown>) => void; canary?: () => Promise<boolean> } = {},
     private readonly transportFactory: TransportFactory = (target, secret, hostKey) => new SshTransport(target, secret, hostKey),
     private readonly startEvents = true,
-  ) {}
+  ) {
+    this.loadTunnelRoutes();
+  }
 
   private log(msg: string, extra?: Record<string, unknown>) { this.hooks.log?.(msg, extra); }
 
@@ -288,7 +290,11 @@ export class HostManager {
     this.repo.hosts.setFacts(h.id, mergeFacts(stored, parsed.facts, this.providedCategories(h), Date.now(), h.intervalSeconds * 3000));
     this.repo.hosts.insertMetrics(h.entityId, source, ts, parsed.metrics);
     this.extras.set(h.id, { ...parsed.extras, ts });
-    if (parsed.extras.tunnelIngress) this.tunnelRoutes.set(h.id, { rules: parsed.extras.tunnelIngress, ts });
+    if (parsed.extras.tunnelIngress) {
+      this.tunnelRoutes.set(h.id, { rules: parsed.extras.tunnelIngress, ts });
+      // Persist so a restart starts from the last known routes instead of "no routes" (which would look like removal).
+      this.repo.setSetting(`tunnelRoutes:${h.id}`, JSON.stringify({ rules: parsed.extras.tunnelIngress, ts }));
+    }
     this.world.patchMeta(h.entityId, { facts: this.facts(h.id), signals: { cloudflared: parsed.extras.cloudflared, tunnelRoutes: parsed.extras.tunnelIngress?.length ?? null, signalsAt: ts } });
   }
 
@@ -300,6 +306,15 @@ export class HostManager {
    * hostnames are gone); `ts` tells consumers whether it is fresh.
    */
   readonly tunnelRoutes = new Map<string, { rules: { hostname: string; service: string }[]; ts: string }>();
+
+  /** Restore the last reported tunnel routes per host (see storeCollected). */
+  private loadTunnelRoutes(): void {
+    for (const h of this.resolve(true)) {
+      const raw = this.repo.getSetting(`tunnelRoutes:${h.id}`);
+      if (!raw) continue;
+      try { this.tunnelRoutes.set(h.id, JSON.parse(raw)); } catch { /* ignore a corrupt cache */ }
+    }
+  }
 
   private checkAgentOverdue(h: ResolvedHost, rt: { agentOverdueReported: boolean }): void {
     const last = h.row?.lastContactAt ? Date.parse(h.row.lastContactAt) : null;
