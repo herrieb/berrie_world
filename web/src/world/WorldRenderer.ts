@@ -4,7 +4,7 @@ import { BLOCK_PITCH, BRIDGE_TYPES } from '@berrie/shared';
 import { effectiveHealth } from '@berrie/shared';
 import {
   buildingArt, ruinsArt, scaffoldArt, treeArt, rockArt, lampArt, signpostArt, lighthouseArt, boatArt, personArt,
-  vanArt, cloudArt, glowCanvas, markerArt, carArt, type SpriteArt,
+  vanArt, cloudArt, glowCanvas, markerArt, carArt, planeArt, type SpriteArt,
 } from './art';
 import { buildTerrain, seaPattern, roadPath, nearestRoad, TREE_TINT, type Terrain, type Rect } from './terrain';
 import { capacityTier, hostFacts, pressure } from '../ui/facts';
@@ -22,6 +22,8 @@ export interface RendererCallbacks {
   /** Personal island arrangement: a whole island was dragged to a new offset (in tiles). */
   onIslandMoved?: (district: string, offset: { dx: number; dy: number }) => void;
   onSelectConnection?: (id: string) => void;
+  /** Sightseeing plane: selected / following state and the island it is over. */
+  onPlane?: (s: { selected: boolean; following: boolean; over: string | null }) => void;
 }
 
 /** Merged view of all islands, used for pathing, placement checks and bounds. */
@@ -145,6 +147,17 @@ export class WorldRenderer {
   private ferries = new Map<string, Sprite>();
   private ferryTrips = new Map<string, { start: number; reverse: boolean }>();
   private cars: Car[] = [];
+  // sightseeing plane (scenery: it does not represent any data)
+  private plane = new Sprite();
+  private planeShadow = new Graphics();
+  private planeLights = new Graphics();
+  private planePath: [number, number][] = [];
+  private planeLen: number[] = [];
+  private planeD = 0;
+  private planeSelected = false;
+  private following = false;
+  private planeOver: string | null = null;
+  private planeKey = '';
   private dragIsland: { district: string; start: [number, number]; delta: [number, number] } | null = null;
   private rings = new Graphics();
   private objects = new Container();
@@ -190,6 +203,7 @@ export class WorldRenderer {
     this.app.stage.addChild(this.sea, this.world, this.night, this.worldTop);
     this.setupInput();
     this.setupClouds();
+    this.setupPlane();
     this.app.ticker.add((t) => this.tick(t.deltaMS));
   }
 
@@ -855,6 +869,103 @@ export class WorldRenderer {
 
   // ------------------------------------------------------------------ ambient
 
+  private setupPlane(): void {
+    const frames = [0, 1].map((f) => this.texFrom(`plane${f}`, () => planeArt(f as 0 | 1)));
+    this.plane.texture = frames[0];
+    this.plane.anchor.set(0.5);
+    this.plane.eventMode = 'static';
+    this.plane.cursor = 'pointer';
+    this.plane.label = 'plane';
+    this.plane.on('pointertap', (e) => { e.stopPropagation(); this.planeSelected = true; this.emitPlane(); });
+    this.shadowLayer.addChild(this.planeShadow);
+    this.worldTop.addChild(this.planeLights, this.plane);
+    this.plane.visible = false;
+  }
+
+  private emitPlane(): void {
+    this.cb.onPlane?.({ selected: this.planeSelected, following: this.following, over: this.planeOver });
+  }
+
+  /** Follow the plane with the camera (after clicking it, press F). Any drag, Esc or F again stops following. */
+  togglePlaneFollow(force?: boolean): void {
+    if (!this.planeSelected && !force) return;
+    this.following = force ?? !this.following;
+    if (this.following) this.planeSelected = true;
+    this.camTarget = null;
+    this.emitPlane();
+  }
+
+  /** Tour over every island centre (nearest-neighbour order), smoothed with a closed Catmull-Rom spline. */
+  private buildPlanePath(): void {
+    const centres = [...this.islands.values()].map((i) => [i.terrain.offsetX + i.terrain.canvas.width / 2, i.terrain.offsetY + i.terrain.canvas.height / 2 - 40] as [number, number]);
+    const key = JSON.stringify(centres.map((c) => c.map(Math.round)));
+    if (key === this.planeKey) return;
+    this.planeKey = key;
+    let pts: [number, number][];
+    if (centres.length <= 1) {
+      const c = centres[0] ?? [0, 0];
+      pts = Array.from({ length: 8 }, (_, i) => [c[0] + Math.cos((i / 8) * Math.PI * 2) * 420, c[1] + Math.sin((i / 8) * Math.PI * 2) * 210] as [number, number]);
+    } else {
+      const rest = [...centres];
+      pts = [rest.shift()!];
+      while (rest.length) {
+        const last = pts[pts.length - 1];
+        rest.sort((a, b) => Math.hypot(a[0] - last[0], a[1] - last[1]) - Math.hypot(b[0] - last[0], b[1] - last[1]));
+        pts.push(rest.shift()!);
+      }
+      if (pts.length === 2) pts.splice(1, 0, [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2 - 260]);
+    }
+    const n = pts.length, out: [number, number][] = [];
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+      for (let k = 0; k < 24; k++) {
+        const t = k / 24, t2 = t * t, t3 = t2 * t;
+        out.push([0, 1].map((j) => 0.5 * ((2 * p1[j]) + (-p0[j] + p2[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t2 + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t3)) as [number, number]);
+      }
+    }
+    this.planePath = out;
+    this.planeLen = [0];
+    for (let i = 1; i <= out.length; i++) { const a = out[i - 1], b = out[i % out.length]; this.planeLen.push(this.planeLen[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1])); }
+  }
+
+  private movePlane(ds: number): void {
+    if (!this.islands.size) { this.plane.visible = false; return; }
+    this.buildPlanePath();
+    const total = this.planeLen[this.planeLen.length - 1];
+    if (!total) return;
+    this.planeD = (this.planeD + ds * 70) % total;
+    let i = 0;
+    while (i < this.planePath.length - 1 && this.planeLen[i + 1] < this.planeD) i++;
+    const a = this.planePath[i], b = this.planePath[(i + 1) % this.planePath.length];
+    const t = (this.planeD - this.planeLen[i]) / Math.max(1e-6, this.planeLen[i + 1] - this.planeLen[i]);
+    const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+    const ALT = 90;
+    this.plane.visible = true;
+    this.plane.position.set(x, y - ALT);
+    this.plane.scale.x = b[0] < a[0] ? -1 : 1;
+    this.plane.rotation = Math.atan2(b[1] - a[1], Math.abs(b[0] - a[0]) || 1) * 0.35 * this.plane.scale.x;
+    this.plane.texture = this.texFrom(`plane${Math.floor(this.time / 60) % 2}`, () => planeArt((Math.floor(this.time / 60) % 2) as 0 | 1));
+    this.planeShadow.clear().ellipse(x, y + 4, 12, 4).fill({ color: 0x000000, alpha: 0.18 });
+    // nav lights: red left, green right, white strobe
+    const blink = Math.floor(this.time / 500) % 2 === 0;
+    this.planeLights.clear();
+    if (this.darkness > 0.2 || this.planeSelected) {
+      this.planeLights.circle(x - 4, y - ALT + 4, 1.5).fill({ color: 0xff4040, alpha: blink ? 1 : 0.5 }).circle(x + 4, y - ALT + 4, 1.5).fill({ color: 0x40ff70, alpha: blink ? 0.5 : 1 });
+      if (this.planeSelected) this.planeLights.circle(x, y - ALT, 18).stroke({ width: 1.5, color: 0x7fd6ff, alpha: 0.8 });
+    }
+    // which island is under the plane? (actual land tile below it, not the island's bounding box)
+    const tx = Math.floor((x / (TW / 2) + y / (TH / 2)) / 2), ty = Math.floor((y / (TH / 2) - x / (TW / 2)) / 2);
+    let over: string | null = null;
+    for (const [d, isl] of this.islands) if (isl.terrain.land.has(`${tx},${ty}`)) { over = d; break; }
+    if (over !== this.planeOver) { this.planeOver = over; this.emitPlane(); }
+    if (this.following) {
+      const k = Math.min(1, ds * 4);
+      this.cam.x += (x - this.cam.x) * k;
+      this.cam.y += (y - ALT / 2 - this.cam.y) * k;
+      this.applyCamera();
+    }
+  }
+
   private setupClouds(): void {
     for (let i = 0; i < 3; i++) {
       const s = new Sprite(this.texFrom(`cloud${i % 3}`, () => cloudArt(i % 3, false)));
@@ -930,6 +1041,7 @@ export class WorldRenderer {
       if (n.scaffold && Math.random() < ds * 1.5) this.burst(n.rect.x + Math.random() * n.rect.w, n.rect.y + n.rect.h, 0xc8b890, 1);
     }
     this.moveCars(ds);
+    this.movePlane(ds);
     // couriers
     for (const c of this.couriers) {
       let i = Math.floor(c.t);
@@ -1105,6 +1217,7 @@ export class WorldRenderer {
         if (!this.dragMoved && Math.hypot(dx, dy) < 3) return;
         this.dragMoved = true;
         this.camTarget = null;
+        if (this.following) { this.following = false; this.emitPlane(); }
         this.cam.x -= dx / this.cam.zoom;
         this.cam.y -= dy / this.cam.zoom;
         this.applyCamera();
@@ -1122,7 +1235,12 @@ export class WorldRenderer {
     // click on empty ground clears selection
     this.app.stage.eventMode = 'static';
     this.app.stage.hitArea = this.app.screen;
-    this.app.stage.on('pointertap', (e) => { if (e.target === this.app.stage && !this.dragMoved) this.cb.onSelect(null); });
+    this.app.stage.on('pointertap', (e) => {
+      if (e.target === this.app.stage && !this.dragMoved) {
+        if (this.planeSelected && !this.following) { this.planeSelected = false; this.emitPlane(); }
+        this.cb.onSelect(null);
+      }
+    });
     this.app.renderer.on('resize', () => { this.app.stage.hitArea = this.app.screen; this.darkness = -1; this.applyCamera(); });
     window.addEventListener('keydown', (e) => {
       if ((e.target as HTMLElement)?.closest?.('input,textarea,select')) return;
@@ -1133,7 +1251,8 @@ export class WorldRenderer {
       else if (e.key === 'ArrowRight') { this.cam.x += step; this.applyCamera(); }
       else if (e.key === 'ArrowUp') { this.cam.y -= step; this.applyCamera(); }
       else if (e.key === 'ArrowDown') { this.cam.y += step; this.applyCamera(); }
-      else if (e.key === 'Escape') this.cb.onSelect(null);
+      else if (e.key === 'f' || e.key === 'F') this.togglePlaneFollow();
+      else if (e.key === 'Escape') { if (this.following || this.planeSelected) { this.following = false; this.planeSelected = false; this.emitPlane(); } else this.cb.onSelect(null); }
     });
   }
 

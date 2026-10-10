@@ -628,6 +628,29 @@ export function boatArt(): SpriteArt {
 }
 
 /** Walking villager, 2 frames. */
+/** Little propeller plane seen from above-side; frame toggles the propeller blur. Faces right (flip for left). */
+export function planeArt(frame: 0 | 1): HTMLCanvasElement {
+  const px = new Px(34, 20);
+  const body = hex(0xf2f2ee), trim = hex(0xd94b3d), dark = hex(0x2f3a4a), glassC = hex(0x7fc8f0);
+  // fuselage
+  for (let x = 4; x <= 28; x++) {
+    const t = Math.abs(x - 15) / 14;
+    const h = x > 25 ? 2 : x < 7 ? 2 : 3;
+    for (let y = 9 - h; y <= 9 + h - 1 - (t > 0.8 ? 1 : 0); y++) px.set(x, y, y === 9 + h - 1 ? shade(body, 0.8) : body);
+  }
+  for (let x = 6; x <= 26; x++) px.set(x, 9, trim); // stripe
+  px.rect(21, 7, 4, 2, glassC); // cockpit
+  // wings (long, slightly in perspective) and tail
+  for (let x = 11; x <= 19; x++) { px.set(x, 12, shade(body, 0.9)); px.set(x, 13, shade(body, 0.85)); px.set(x - 1, 14, shade(body, 0.8)); }
+  for (let x = 12; x <= 18; x++) { px.set(x, 5, shade(body, 1.0)); px.set(x + 1, 4, shade(body, 0.95)); }
+  px.rect(3, 3, 3, 5, body); px.rect(3, 3, 3, 1, trim); px.rect(2, 10, 5, 1, shade(body, 0.85));
+  // nose + propeller
+  px.rect(29, 8, 2, 3, dark);
+  if (frame === 0) px.rect(31, 4, 1, 11, hex(0x9aa3b5)); else { px.rect(31, 8, 1, 3, hex(0x9aa3b5)); px.set(32, 9, hex(0xc8ccd6)); }
+  px.outline(OUT);
+  return px.done();
+}
+
 /** Small car on a road tile, oriented along the x or y tile axis. */
 export function carArt(body: RGB, alongX: boolean): SpriteArt {
   const px = canvasFor(1, 1, 12, 3);

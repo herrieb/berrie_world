@@ -455,3 +455,6 @@ button:disabled:hover { border-color: var(--line-2); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .controls button.spinning .icon { animation: spin 1s linear infinite; }
+
+.plane-banner { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 8px 12px; z-index: 6; max-width: calc(100% - 32px); font-size: 12.5px; }
+kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 1px 5px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 4px; background: #0a1324; }

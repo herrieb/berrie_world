@@ -178,6 +178,9 @@ export class World {
     }
     const now = this.repo.now();
     const scopeKey = `${inv.adapter}|${inv.scope}`;
+    // Known before this run (survives restarts, unlike the in-memory set): only announce a *change* to uncertain.
+    const prevState = this.repo.getAdapterState(inv.adapter, inv.scope);
+    if (prevState && prevState.completeness !== 'complete') this.uncertainScopes.add(scopeKey);
     this.repo.tx(() => {
       this.repo.recordObservation(inv.adapter, inv.scope, inv.completeness, inv.entities.length, inv.error ?? null);
       const seen = new Set<string>();

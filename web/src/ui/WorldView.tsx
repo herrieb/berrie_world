@@ -24,6 +24,7 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
   const [arrange, setArrange] = useState(false);
   const [redrawing, setRedrawing] = useState(false);
   const [confirmNewMap, setConfirmNewMap] = useState(false);
+  const [plane, setPlane] = useState<{ selected: boolean; following: boolean; over: string | null }>({ selected: false, following: false, over: null });
   /** Viewers: run discovery and redraw. Operators: generate a new map (after confirmation). */
   const redraw = async (newMap: boolean) => {
     setConfirmNewMap(false);
@@ -57,12 +58,14 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       // Camera position is personal; persisted (debounced) so it follows the user across devices.
       onCameraSettled: (camera) => savePrefs({ camera }),
       onSelectConnection: (id) => useStore.getState().selectConnection(id),
+      onPlane: (p) => setPlane(p),
       onIslandMoved: (district, offset) => {
         const cur = useStore.getState().prefs.islandOffsets ?? {};
         savePrefs({ islandOffsets: { ...cur, [district]: offset } });
       },
     });
     rendererRef.current = r;
+    if (import.meta.env.DEV) (window as unknown as { __bwRenderer: WorldRenderer }).__bwRenderer = r; // dev-only debugging hook
     let cancelled = false;
     void r.init().then(() => { if (!cancelled) setReady(true); });
     const off = onServerMessage((m) => { if (m.t === 'event') r.onEvent(m.data); });
@@ -185,6 +188,15 @@ export function WorldView({ alerts, summary, hidden }: { alerts: Alert[]; summar
       )}
       {s.editLayout && <div className="edit-banner">Layout editor: drag a building to a free spot. Positions are saved and pinned.<button onClick={() => s.setEditLayout(false)}>Done</button></div>}
       {toast && <div className="toast">{toast}</div>}
+      {(plane.selected || plane.following) && (
+        <div className="plane-banner card">
+          <span>✈️</span>
+          {plane.following
+            ? <span>Following the sightseeing plane{plane.over ? <> over <b>{s.entities[plane.over]?.displayName ?? (plane.over === 'external' ? 'the external harbour' : plane.over)}</b></> : ' over open water'} — drag the map, press <kbd>F</kbd> or <kbd>Esc</kbd> to stop</span>
+            : <span>Sightseeing plane selected — press <kbd>F</kbd> to follow it over all islands</span>}
+          <button onClick={() => rendererRef.current?.togglePlaneFollow(!plane.following)}>{plane.following ? 'Stop' : 'Follow'}</button>
+        </div>
+      )}
       {confirmNewMap && (
         <div className="modal-backdrop" onClick={() => setConfirmNewMap(false)}>
           <div className="modal card" onClick={(ev) => ev.stopPropagation()} role="dialog" aria-modal="true">
