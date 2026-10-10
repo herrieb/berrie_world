@@ -69,7 +69,7 @@ Everyone signs in with a personal account. On first start nobody exists yet: the
 - Removing a person deletes their personal state (preferences, favorites, saved views, tasks, sessions); events,
   audit entries and other shared history stay intact.
 - Personal (per-user, never shared): camera, island arrangement, favorites, saved views, tasks, notification settings.
-- Recovery from a shell: `docker exec berrie-world node server/dist/cli.js list-users | reset-password <user> | disable-mfa <user>`.
+- Recovery from a shell: `docker exec berrie-world node server/dist/cli.js list-users | reset-password <user> | disable-mfa <user> | cleanup-build-steps`.
 
 ## Islands and Server Harbor
 
@@ -195,7 +195,7 @@ Allowed types: `http.request`, `automation.executed`, `ai.request_started`, `ai.
 ```bash
 cp .env.example .env            # set ADMIN_TOKEN (long random), keep ENABLE_ACTIONS=false at first
 cp config/berrie.config.example.json config/berrie.config.json
-docker compose up -d --build
+DOCKER_BUILDKIT=1 docker compose up -d --build   # BuildKit: no temporary build-step containers
 curl -s http://127.0.0.1:4780/api/health
 ```
 

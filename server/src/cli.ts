@@ -36,8 +36,32 @@ try {
       console.log(`Two-factor authentication disabled for ${u.username}; their sessions were ended.`);
       break;
     }
+    case 'cleanup-build-steps': {
+      // Entities recorded from temporary image-build containers (before they were ignored) and their incidents.
+      const isStep = (meta: Record<string, unknown>) => /^sha256:[0-9a-f]{12,}$/.test(String(meta.image ?? '')) && !meta.composeProject;
+      const steps = repo.listEntities(true).filter((e) => e.kind === 'service' && e.source === 'docker' && isStep(e.meta));
+      const ids = new Set(steps.map((e) => e.id));
+      const now = repo.now();
+      let closed = 0;
+      repo.tx(() => {
+        for (const i of repo.ops.incidents({ status: ['open', 'monitoring'] })) {
+          const ents = repo.ops.incidentEntities(i.id);
+          if (!ents.length || !ents.every((x) => ids.has(x.entityId))) continue;
+          repo.ops.updateIncident(i.id, { status: 'resolved', resolvedAt: now, resolvedBy: 'cli' });
+          repo.ops.addTimeline(i.id, 'resolved', 'cli', null, 'Closed: this was a temporary container of a Docker image build, not a service');
+          closed++;
+        }
+        for (const e of steps) {
+          if (e.lifecycle !== 'archived') repo.updateEntity(e.id, { lifecycle: 'archived', removedAt: e.removedAt ?? now, archivedAt: now });
+          repo.deleteLayout(e.id);
+        }
+      });
+      repo.audit({ actor: 'cli', ip: null, action: 'cleanup.build_steps', entityId: null, params: { entities: steps.length, incidents: closed }, result: 'ok' });
+      console.log(`Archived ${steps.length} build-step entr${steps.length === 1 ? 'y' : 'ies'} and resolved ${closed} incident(s).`);
+      break;
+    }
     default:
-      fail('commands: list-users | reset-password <username> | disable-mfa <username>');
+      fail('commands: list-users | reset-password <username> | disable-mfa <username> | cleanup-build-steps');
   }
 } finally {
   repo.close();

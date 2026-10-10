@@ -63,6 +63,23 @@ const container = (name: string, id: string, state = 'running', status = 'Up 1 m
 
 // ---------- tests ----------
 
+describe('build-step containers', () => {
+  it('temporary containers of an image build are not services', async () => {
+    const fake = new FakeDocker();
+    fake.containers = [
+      container('web', 'c1'),
+      { Id: 'b1', Names: ['/ecstatic_robinson'], Image: 'sha256:8f2037577a1a9cc5e9960f1771e42f488e1286f90f3b916102964e21827c0f1e', ImageID: 'sha256:8f20', Created: 1, State: 'exited', Status: 'Exited (0) 2 seconds ago', Labels: {} },
+      { Id: 'r1', Names: ['/my_job'], Image: 'alpine:3.20', ImageID: 'sha256:aa', Created: 1, State: 'exited', Status: 'Exited (0) 1 minute ago', Labels: {} },
+    ];
+    const inv = await new DockerAdapter({ id: 'local', name: 'local' }, fake).inventory();
+    const ids = inv.entities.map((e) => e.id);
+    expect(ids).toContain('docker:local:app/web');
+    expect(ids).toContain('docker:local:name/my_job'); // a real (tagged) container stays visible
+    expect(ids.some((i) => i.includes('ecstatic_robinson'))).toBe(false);
+    expect(inv.completeness).toBe('complete');
+  });
+});
+
 describe('lifecycle reconciliation', () => {
   let t: ReturnType<typeof setup>;
   beforeEach(() => { t = setup(); t.world.reconcile(configInv()); });

@@ -53,6 +53,14 @@ export function containerIdentity(hostId: string, labels: Record<string, string>
   return `docker:${hostId}:name/${name}`.replace(SAFE_ID, '_');
 }
 
+/**
+ * Intermediate containers of a classic `docker build` run each build step for a few seconds under a random name,
+ * from an untagged image id, with no compose labels. They are not services.
+ */
+export function isBuildStep(image: string, labels: Record<string, string>): boolean {
+  return /^sha256:[0-9a-f]{12,}$/.test(image) && !labels[L.project] && !labels[L.id];
+}
+
 export function containerHealth(c: Pick<ContainerSummary, 'State' | 'Status' | 'Health'>, oneshot: boolean): { health: Health; reason: string } {
   const status = c.Status ?? '';
   const hc = c.Health?.Status ?? /\((healthy|unhealthy|health: starting)\)/.exec(status)?.[1];
@@ -120,6 +128,7 @@ export class DockerAdapter {
         const name = (c.Names?.[0] ?? c.Id.slice(0, 12)).replace(/^\//, '');
         const id = containerIdentity(this.host.id, labels, name);
         if (!id || labels[L.hide] === 'true') continue;
+        if (isBuildStep(c.Image, labels)) continue; // temporary container of a (legacy) image build, not a service
         const project = labels[L.project];
         const service = labels[L.service];
         let parentId = hostId;

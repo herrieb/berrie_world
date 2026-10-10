@@ -1,6 +1,6 @@
 import type { AdapterStatus, HostnameHint } from '@berrie/shared';
 import type { AppConfig, CheckConfig } from '../config.js';
-import { hostEntityId } from '../adapters/docker.js';
+import { hostEntityId, isBuildStep } from '../adapters/docker.js';
 import { configInventory, describeCheck, endpointInventory, hintStatus } from '../adapters/config.js';
 import { runProbe, tcpProbe } from '../adapters/probes.js';
 import type { DemoAdapter } from '../adapters/demo.js';
@@ -171,6 +171,7 @@ export class Scheduler {
   }
 
   onDockerEvent(hostId: string, ev: { action: string; entityId: string | null; name: string; attrs: Record<string, string> }): void {
+    if (isBuildStep(ev.attrs.image ?? '', ev.attrs)) return;
     const action = ev.action.split(':')[0];
     const known = ev.entityId ? this.world.repo.getEntity(ev.entityId) : undefined;
     const source = `docker:${hostId}`;
